@@ -1,0 +1,18 @@
+[package]
+name = "zkasper-witness-gen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zkasper-common = { path = "../common" }
+serde = { workspace = true, features = ["std"] }
+serde_json = "1"
+bincode = { workspace = true }
+sha2 = { workspace = true }
+ark-ff = { workspace = true }
+ark-bn254 = { workspace = true }
+light-poseidon = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"

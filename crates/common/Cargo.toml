@@ -1,0 +1,17 @@
+[package]
+name = "zkasper-common"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+serde = { workspace = true }
+serde-big-array = "0.5"
+bincode = { workspace = true }
+sha2 = { workspace = true }
+ark-ff = { workspace = true }
+ark-bn254 = { workspace = true }
+light-poseidon = { workspace = true }

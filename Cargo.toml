@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/witness-gen",
+    "crates/epoch-diff-guest",
+    "crates/finality-guest",
+    "crates/bootstrap-guest",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", default-features = false, features = ["derive"] }
+bincode = "1.3"
+sha2 = "0.10"
+ark-ff = "0.5"
+ark-bn254 = "0.5"
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-serialize = "0.5"
+light-poseidon = "0.4"
+
+# Zisk guest OS
+# ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }
