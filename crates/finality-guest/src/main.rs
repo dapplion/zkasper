@@ -3,28 +3,36 @@
 // Proves that validators representing >= 2/3 of total active balance
 // attested to a target checkpoint with valid BLS signatures.
 //
+// Public outputs: (accumulator_commitment, finalized_block_root)
+//
 // On Zisk this file would use:
 //   #![no_main]
 //   ziskos::entrypoint!(main);
 
-use zkasper_common::types::{Checkpoint, FinalityWitness};
+use zkasper_common::types::FinalityWitness;
 
 fn main() {
     let input = std::fs::read("input.bin").expect("read input.bin");
     let witness: FinalityWitness = bincode::deserialize(&input).expect("deserialize witness");
 
-    let checkpoint = verify_finality(&witness);
+    let (commitment, block_root) = verify_finality(&witness);
 
-    eprintln!(
-        "finalized: epoch={} root={:x?}",
-        checkpoint.epoch, checkpoint.root,
-    );
+    eprintln!("accumulator_commitment: {:x?}", commitment);
+    eprintln!("finalized_block_root: {:x?}", block_root);
 }
 
-/// Core finality verification logic. Returns the finalized checkpoint.
-pub fn verify_finality(witness: &FinalityWitness) -> Checkpoint {
+/// Core finality verification logic. Returns (accumulator_commitment, finalized_block_root).
+pub fn verify_finality(witness: &FinalityWitness) -> ([u8; 32], [u8; 32]) {
     use zkasper_common::bls::{compute_signing_root, verify_aggregate_signature};
-    use zkasper_common::poseidon::{poseidon_leaf, verify_poseidon_merkle_proof};
+    use zkasper_common::poseidon::{accumulator_commitment, poseidon_leaf, verify_poseidon_merkle_proof};
+
+    // Verify the accumulator commitment binds poseidon_root + total_active_balance
+    let expected_commitment =
+        accumulator_commitment(&witness.poseidon_root, witness.total_active_balance);
+    assert_eq!(
+        expected_commitment, witness.accumulator_commitment,
+        "accumulator commitment mismatch",
+    );
 
     let mut attesting_balance: u64 = 0;
 
@@ -78,5 +86,5 @@ pub fn verify_finality(witness: &FinalityWitness) -> Checkpoint {
         witness.total_active_balance,
     );
 
-    witness.finalized_checkpoint.clone()
+    (witness.accumulator_commitment, witness.finalized_block_root)
 }

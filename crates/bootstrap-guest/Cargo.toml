@@ -3,6 +3,14 @@ name = "zkasper-bootstrap-guest"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "zkasper_bootstrap_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkasper-bootstrap-guest"
+path = "src/main.rs"
+
 [dependencies]
 zkasper-common = { path = "../common", default-features = false }
 serde = { workspace = true }

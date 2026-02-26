@@ -38,6 +38,22 @@ pub fn poseidon_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     fr_to_bytes(&hash)
 }
 
+/// Compute the accumulator commitment: `poseidon_pair(poseidon_root, total_active_balance)`.
+///
+/// This single value binds a Poseidon validator tree root to the total active balance,
+/// allowing the on-chain contract to store one bytes32 instead of two separate values.
+pub fn accumulator_commitment(poseidon_root: &[u8; 32], total_active_balance: u64) -> [u8; 32] {
+    let root_fr = Fr::from_le_bytes_mod_order(poseidon_root);
+    let balance_fr = Fr::from(total_active_balance);
+
+    let mut poseidon = Poseidon::<Fr>::new_circom(2).expect("poseidon t=3");
+    let hash = poseidon
+        .hash(&[root_fr, balance_fr])
+        .expect("poseidon hash");
+
+    fr_to_bytes(&hash)
+}
+
 /// Compute a Poseidon Merkle root from leaf, index, and siblings.
 pub fn compute_poseidon_merkle_root(
     leaf: &[u8; 32],

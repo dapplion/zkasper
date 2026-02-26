@@ -9,10 +9,10 @@ use zkasper_common::types::ValidatorData;
 /// Full Poseidon Merkle tree stored level-by-level.
 pub struct PoseidonTree {
     /// Tree depth (40 for VALIDATOR_REGISTRY_LIMIT = 2^40).
-    depth: u32,
+    pub(crate) depth: u32,
     /// Nodes stored level-by-level. Level 0 = leaves, level `depth` = root.
     /// Each level has `2^(depth - level)` nodes.
-    levels: Vec<Vec<[u8; 32]>>,
+    pub(crate) levels: Vec<Vec<[u8; 32]>>,
 }
 
 impl PoseidonTree {
@@ -41,6 +41,11 @@ impl PoseidonTree {
             levels.push(parents);
         }
 
+        Self { depth, levels }
+    }
+
+    /// Reconstruct from raw level data (for loading from DB).
+    pub fn from_raw(levels: Vec<Vec<[u8; 32]>>, depth: u32) -> Self {
         Self { depth, levels }
     }
 

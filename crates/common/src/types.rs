@@ -114,10 +114,16 @@ pub struct AttestationWitness {
 /// Witness for Proof 2: Finality.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FinalityWitness {
-    // -- public inputs --
+    // -- public inputs (circuit outputs) --
+    /// `poseidon(poseidon_root, total_active_balance)` — binds to the accumulator
+    /// state tracked by the epoch-diff chain. The circuit verifies this internally.
+    pub accumulator_commitment: [u8; 32],
+    /// The block root being proven finalized (circuit output).
+    pub finalized_block_root: [u8; 32],
+
+    // -- private witness --
     pub poseidon_root: [u8; 32],
     pub total_active_balance: u64,
-    pub finalized_checkpoint: Checkpoint,
     /// `compute_domain(DOMAIN_BEACON_ATTESTER, fork_version, genesis_validators_root)`,
     /// precomputed by the witness generator.
     pub signing_domain: [u8; 32],

@@ -30,7 +30,7 @@ zkasper/
 │   │       ├── witness_epoch_diff.rs   # assemble EpochDiffWitness
 │   │       ├── witness_finality.rs     # assemble FinalityWitness
 │   │       ├── witness_bootstrap.rs    # assemble BootstrapWitness
-│   │       └── db.rs                   # sled persistence for Poseidon tree + cursor
+│   │       └── db.rs                   # bincode file persistence for Poseidon tree + cursor
 │   │
 │   ├── epoch-diff-guest/               # Zisk guest binary: Proof 1
 │   │   ├── Cargo.toml
@@ -80,7 +80,7 @@ ark-ec = { git = "https://github.com/0xPolygonHermez/zisk-patch-ark-algebra.git"
 ark-serialize = { git = "https://github.com/0xPolygonHermez/zisk-patch-ark-algebra.git" }
 ```
 
-`witness-gen` additionally depends on: `tokio`, `reqwest`, `clap`, `sled`, `anyhow`, `serde_json`.
+`witness-gen` additionally depends on: `tokio`, `reqwest`, `clap`, `anyhow`, `serde_json`, `hex`, `async-trait`, `bincode`.
 
 ## crate: `common`
 
@@ -148,9 +148,12 @@ pub struct AttestationWitness {
 }
 
 pub struct FinalityWitness {
+    // public inputs (circuit outputs)
+    pub accumulator_commitment: [u8; 32],   // poseidon(poseidon_root, total_active_balance)
+    pub finalized_block_root: [u8; 32],
+    // private witness
     pub poseidon_root: [u8; 32],
     pub total_active_balance: u64,
-    pub finalized_checkpoint: Checkpoint,
     pub signing_domain: [u8; 32],
     pub attestations: Vec<AttestationWitness>,
 }
@@ -277,7 +280,7 @@ Full Poseidon Merkle tree in memory (2^40 capacity, ~1M populated leaves). Suppo
 - `update_leaf(index, new_leaf) -> old_siblings` — returns siblings BEFORE update, then mutates
 - `get_siblings(index) -> siblings` — for finality proof reads
 - `root() -> [u8; 32]`
-- `save/load` via sled for persistence across runs
+- `save/load` via bincode file for persistence across runs
 
 ### `state_diff.rs`
 - Fetch two beacon states, extract validator registries
@@ -301,14 +304,24 @@ zkasper-witness-gen run --beacon-url <URL>   # continuous mode
 
 Outputs: `input.bin` (bincode-serialized witness) for the corresponding guest program.
 
+## accumulator commitment
+
+To minimize on-chain storage, the contract stores a single `accumulatorCommitment = poseidon(poseidon_root, total_active_balance)` instead of two separate values. The circuits compute this commitment internally:
+
+- **Bootstrap** outputs: `(accumulator_commitment, state_root)`
+- **EpochDiff** outputs: `(new_accumulator_commitment, state_root_1, state_root_2)`
+- **Finality** outputs: `(accumulator_commitment, finalized_block_root)` — no epoch, the block root alone identifies what was finalized
+
+Poseidon is used (not SHA-256) because the contract never recomputes the commitment — it only stores and compares. The circuits already use Poseidon everywhere.
+
 ## crate: `onchain-verifier`
 
 `ZkasperVerifier.sol`:
-- Stores: `poseidonRoot`, `totalActiveBalance`, `latestStateRoot`, `latestFinalizedEpoch`, `latestFinalizedCheckpointRoot`
-- `bootstrap(proof, publicOutputs, stateRoot)` — one-time init
-- `submitEpochDiff(proof, publicOutputs, stateRoot1, stateRoot2)` — verify proof, update accumulator state
-- `submitFinality(proof, publicOutputs)` — verify proof, update finalized checkpoint
-- `isFinalized(blockRoot, epoch) -> bool` — query
+- Stores: `accumulatorCommitment`, `latestStateRoot`, `latestFinalizedBlockRoot`, `initialized`
+- `bootstrap(proof, publicOutputs)` — one-time init, extracts commitment + state_root
+- `submitEpochDiff(proof, publicOutputs)` — verify proof, verify state_root_1 matches stored, update commitment + state_root
+- `submitFinality(proof, publicOutputs)` — verify proof, verify commitment matches stored, update finalized block root
+- `isFinalized(blockRoot) -> bool` — query
 
 Verifier interface depends on Zisk's proof format (likely Groth16/FFLONK wrapper). Placeholder `IZiskVerifier.verify(proof, publicOutputs)`.
 

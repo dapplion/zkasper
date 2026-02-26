@@ -3,8 +3,16 @@ name = "zkasper-witness-gen"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "zkasper_witness_gen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkasper-witness-gen"
+path = "src/main.rs"
+
 [dependencies]
-zkasper-common = { path = "../common" }
+zkasper-common = { path = "../common", features = ["test-utils"] }
 serde = { workspace = true, features = ["std"] }
 serde_json = "1"
 bincode = { workspace = true }
@@ -16,3 +24,10 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
+hex = "0.4"
+async-trait = "0.1"
+
+[dev-dependencies]
+zkasper-bootstrap-guest = { path = "../bootstrap-guest" }
+zkasper-epoch-diff-guest = { path = "../epoch-diff-guest" }
+tempfile = "3"

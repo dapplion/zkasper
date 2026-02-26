@@ -3,6 +3,14 @@ name = "zkasper-epoch-diff-guest"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "zkasper_epoch_diff_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkasper-epoch-diff-guest"
+path = "src/main.rs"
+
 [dependencies]
 zkasper-common = { path = "../common", default-features = false }
 serde = { workspace = true }

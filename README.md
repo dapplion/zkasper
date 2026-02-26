@@ -1,5 +1,7 @@
 # zkasper
 
+Based on the [beacon chain finality proof research](https://github.com/dapplion/research/blob/main/beacon_chain_finality_proof.md).
+
 ZK proof of Ethereum beacon chain finality for trustless bridges, targeting the [Zisk](https://github.com/0xPolygonHermez/zisk) zkVM.
 
 ## Overview
@@ -39,6 +41,56 @@ cargo test
 
 Guest programs currently compile as normal binaries for native testing. To target Zisk, uncomment the `ziskos` dependency and `#![no_main]` / `entrypoint!` annotations in each guest crate.
 
+## Witness Generator Usage
+
+The witness generator talks to a standard Ethereum beacon node and produces binary witness files that can be fed to the guest programs.
+
+### Prerequisites
+
+- A beacon node with REST API enabled (e.g., Lighthouse, Lodestar, Prysm)
+- The beacon node URL (e.g., `http://localhost:5052`)
+
+### Commands
+
+**Bootstrap** — one-time Poseidon tree construction from a beacon state:
+
+```sh
+cargo run -p zkasper-witness-gen -- --beacon-url http://localhost:5052 bootstrap 3200
+```
+
+This fetches all validators at slot 3200, builds the Poseidon tree, saves state to `zkasper.db`, and writes `bootstrap_input.bin`.
+
+**Epoch Diff** — generate proof witness for validator set changes between two epoch boundaries:
+
+```sh
+cargo run -p zkasper-witness-gen -- --beacon-url http://localhost:5052 epoch-diff 3200 3232
+```
+
+Loads the saved tree, computes mutations between the two states, updates the tree, and writes `epoch_diff_input.bin`.
+
+**Finality** — generate proof witness for a finalized checkpoint:
+
+```sh
+cargo run -p zkasper-witness-gen -- --beacon-url http://localhost:5052 finality 100 \
+  --target-root 0x... --signing-domain 0x...
+```
+
+Collects attestations targeting the checkpoint, builds Poseidon proofs, and writes `finality_input.bin`.
+
+### Options
+
+- `--beacon-url` (or `BEACON_API_URL` env) — beacon node REST URL
+- `--db-path` — persistent state file (default: `zkasper.db`)
+- `--output-dir` — directory for witness files (default: `.`)
+
+### Typical workflow
+
+```
+bootstrap <slot>  →  epoch-diff <slot> <slot+32>  →  epoch-diff ...  →  finality <epoch>
+```
+
+Each epoch-diff advances the accumulator by one epoch. The finality proof can be generated once sufficient attestations are available for the target checkpoint.
+
 ## Status
 
 - [x] Core library (SSZ, Poseidon, Merkle, types)
@@ -46,7 +98,9 @@ Guest programs currently compile as normal binaries for native testing. To targe
 - [x] Bootstrap circuit with tests
 - [x] Finality circuit (Poseidon verification done, BLS signature verification WIP)
 - [x] Host-side Poseidon tree with incremental updates
-- [ ] Witness generator (beacon API integration, state diffing, attestation collection)
+- [x] Witness generator (beacon API, state diffing, attestation collection, DB persistence)
+- [x] Accumulator commitment optimization (`poseidon(root, balance)` single on-chain slot)
+- [x] Integration tests with MockBeaconApi
 - [ ] BLS12-381 aggregate signature verification (pending Zisk pairing support)
 - [ ] Solidity verifier integration with Zisk proof format
 - [ ] Recursive proof composition for bootstrap chunking

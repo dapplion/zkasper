@@ -1,13 +1,21 @@
 //! Beacon REST API client.
 //!
 //! Talks to a standard Ethereum beacon node via the Beacon API:
-//! - `/eth/v2/debug/beacon/states/{state_id}` — full SSZ state
 //! - `/eth/v1/beacon/states/{state_id}/validators` — validator list
-//! - `/eth/v1/beacon/blocks/{block_id}/attestations` — block attestations
+//! - `/eth/v2/beacon/blocks/{block_id}/attestations` — block attestations
 //! - `/eth/v1/beacon/states/{state_id}/committees` — committee assignments
 //! - `/eth/v1/beacon/headers/{block_id}` — block header
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+
+/// Trait abstracting beacon API access. Implement this for mock-based testing.
+#[async_trait::async_trait]
+pub trait BeaconApi {
+    async fn get_validators(&self, state_id: &str) -> Result<Vec<ValidatorResponse>>;
+    async fn get_block_attestations(&self, block_id: &str) -> Result<Vec<AttestationResponse>>;
+    async fn get_committees(&self, state_id: &str, epoch: u64) -> Result<Vec<CommitteeResponse>>;
+    async fn get_header(&self, block_id: &str) -> Result<HeaderResponse>;
+}
 
 pub struct BeaconApiClient {
     pub base_url: String,
@@ -21,52 +29,92 @@ impl BeaconApiClient {
             client: reqwest::Client::new(),
         }
     }
+}
 
-    /// Fetch the full list of validators at a given state.
-    pub async fn get_validators(&self, _state_id: &str) -> Result<Vec<ValidatorResponse>> {
-        todo!()
+#[async_trait::async_trait]
+impl BeaconApi for BeaconApiClient {
+    async fn get_validators(&self, state_id: &str) -> Result<Vec<ValidatorResponse>> {
+        let url = format!(
+            "{}/eth/v1/beacon/states/{}/validators",
+            self.base_url, state_id
+        );
+        let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        let data = resp["data"]
+            .as_array()
+            .context("missing data array in validators response")?;
+
+        let mut validators = Vec::with_capacity(data.len());
+        for entry in data {
+            validators.push(parse_validator_entry(entry)?);
+        }
+        Ok(validators)
     }
 
-    /// Fetch attestations from a block.
-    pub async fn get_block_attestations(
-        &self,
-        _block_id: &str,
-    ) -> Result<Vec<AttestationResponse>> {
-        todo!()
+    async fn get_block_attestations(&self, block_id: &str) -> Result<Vec<AttestationResponse>> {
+        let url = format!(
+            "{}/eth/v2/beacon/blocks/{}/attestations",
+            self.base_url, block_id
+        );
+        let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        let data = resp["data"]
+            .as_array()
+            .context("missing data array in attestations response")?;
+
+        let mut attestations = Vec::with_capacity(data.len());
+        for entry in data {
+            attestations.push(parse_attestation_entry(entry)?);
+        }
+        Ok(attestations)
     }
 
-    /// Fetch committee assignments for an epoch.
-    pub async fn get_committees(
-        &self,
-        _state_id: &str,
-        _epoch: u64,
-    ) -> Result<Vec<CommitteeResponse>> {
-        todo!()
+    async fn get_committees(&self, state_id: &str, epoch: u64) -> Result<Vec<CommitteeResponse>> {
+        let url = format!(
+            "{}/eth/v1/beacon/states/{}/committees?epoch={}",
+            self.base_url, state_id, epoch
+        );
+        let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        let data = resp["data"]
+            .as_array()
+            .context("missing data array in committees response")?;
+
+        let mut committees = Vec::with_capacity(data.len());
+        for entry in data {
+            committees.push(parse_committee_entry(entry)?);
+        }
+        Ok(committees)
     }
 
-    /// Fetch a block header.
-    pub async fn get_header(&self, _block_id: &str) -> Result<HeaderResponse> {
-        todo!()
+    async fn get_header(&self, block_id: &str) -> Result<HeaderResponse> {
+        let url = format!("{}/eth/v1/beacon/headers/{}", self.base_url, block_id);
+        let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        let header = &resp["data"]["header"]["message"];
+
+        Ok(HeaderResponse {
+            slot: parse_u64_str(header, "slot")?,
+            state_root: parse_hex_bytes32(header, "state_root")?,
+            parent_root: parse_hex_bytes32(header, "parent_root")?,
+        })
     }
 }
 
-// Placeholder response types — will be filled in when implementing the API calls.
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ValidatorResponse {
     pub index: u64,
     pub pubkey: [u8; 48],
     pub effective_balance: u64,
     pub activation_epoch: u64,
     pub exit_epoch: u64,
-    // All 8 SSZ field chunks for this validator
     pub withdrawal_credentials: [u8; 32],
     pub slashed: bool,
     pub activation_eligibility_epoch: u64,
     pub withdrawable_epoch: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AttestationResponse {
     pub aggregation_bits: Vec<u8>,
     pub committee_bits: Vec<u8>,
@@ -80,16 +128,119 @@ pub struct AttestationResponse {
     pub signature: [u8; 96],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommitteeResponse {
     pub slot: u64,
     pub index: u64,
     pub validators: Vec<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeaderResponse {
     pub slot: u64,
     pub state_root: [u8; 32],
     pub parent_root: [u8; 32],
+}
+
+// ---------------------------------------------------------------------------
+// JSON parsing helpers
+// ---------------------------------------------------------------------------
+
+fn parse_u64_str(val: &serde_json::Value, field: &str) -> Result<u64> {
+    val[field]
+        .as_str()
+        .context(format!("missing {field}"))?
+        .parse::<u64>()
+        .context(format!("invalid {field}"))
+}
+
+fn parse_hex_bytes32(val: &serde_json::Value, field: &str) -> Result<[u8; 32]> {
+    let s = val[field].as_str().context(format!("missing {field}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).context(format!("invalid hex in {field}"))?;
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&bytes);
+    Ok(result)
+}
+
+fn parse_hex_bytes48(val: &serde_json::Value, field: &str) -> Result<[u8; 48]> {
+    let s = val[field].as_str().context(format!("missing {field}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).context(format!("invalid hex in {field}"))?;
+    let mut result = [0u8; 48];
+    result.copy_from_slice(&bytes);
+    Ok(result)
+}
+
+fn parse_hex_bytes96(val: &serde_json::Value, field: &str) -> Result<[u8; 96]> {
+    let s = val[field].as_str().context(format!("missing {field}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).context(format!("invalid hex in {field}"))?;
+    let mut result = [0u8; 96];
+    result.copy_from_slice(&bytes);
+    Ok(result)
+}
+
+fn parse_hex_bitfield(val: &serde_json::Value, field: &str) -> Result<Vec<u8>> {
+    let s = val[field].as_str().context(format!("missing {field}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    hex::decode(s).context(format!("invalid hex in {field}"))
+}
+
+fn parse_validator_entry(entry: &serde_json::Value) -> Result<ValidatorResponse> {
+    let v = &entry["validator"];
+    Ok(ValidatorResponse {
+        index: parse_u64_str(entry, "index")?,
+        pubkey: parse_hex_bytes48(v, "pubkey")?,
+        effective_balance: parse_u64_str(v, "effective_balance")?,
+        activation_epoch: parse_u64_str(v, "activation_epoch")?,
+        exit_epoch: parse_u64_str(v, "exit_epoch")?,
+        withdrawal_credentials: parse_hex_bytes32(v, "withdrawal_credentials")?,
+        slashed: v["slashed"].as_bool().unwrap_or(false),
+        activation_eligibility_epoch: parse_u64_str(v, "activation_eligibility_epoch")?,
+        withdrawable_epoch: parse_u64_str(v, "withdrawable_epoch")?,
+    })
+}
+
+fn parse_attestation_entry(entry: &serde_json::Value) -> Result<AttestationResponse> {
+    let data = &entry["data"];
+    Ok(AttestationResponse {
+        aggregation_bits: parse_hex_bitfield(entry, "aggregation_bits")?,
+        committee_bits: entry
+            .get("committee_bits")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                let s = s.strip_prefix("0x").unwrap_or(s);
+                hex::decode(s).unwrap_or_default()
+            })
+            .unwrap_or_default(),
+        data_slot: parse_u64_str(data, "slot")?,
+        data_index: parse_u64_str(data, "index")?,
+        data_beacon_block_root: parse_hex_bytes32(data, "beacon_block_root")?,
+        data_source_epoch: parse_u64_str(&data["source"], "epoch")?,
+        data_source_root: parse_hex_bytes32(&data["source"], "root")?,
+        data_target_epoch: parse_u64_str(&data["target"], "epoch")?,
+        data_target_root: parse_hex_bytes32(&data["target"], "root")?,
+        signature: parse_hex_bytes96(entry, "signature")?,
+    })
+}
+
+fn parse_committee_entry(entry: &serde_json::Value) -> Result<CommitteeResponse> {
+    let validators = entry["validators"]
+        .as_array()
+        .context("missing validators")?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .context("validator not string")?
+                .parse::<u64>()
+                .context("invalid validator index")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(CommitteeResponse {
+        slot: parse_u64_str(entry, "slot")?,
+        index: parse_u64_str(entry, "index")?,
+        validators,
+    })
 }
