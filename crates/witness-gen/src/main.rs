@@ -1,7 +1,7 @@
 #[allow(dead_code)]
-mod beacon_api;
-#[allow(dead_code)]
 mod attestation_collector;
+#[allow(dead_code)]
+mod beacon_api;
 #[allow(dead_code)]
 mod db;
 #[allow(dead_code)]

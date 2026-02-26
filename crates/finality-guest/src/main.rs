@@ -7,20 +7,45 @@
 //   #![no_main]
 //   ziskos::entrypoint!(main);
 
-use zkasper_common::bls::compute_signing_root;
-use zkasper_common::poseidon::{poseidon_leaf, verify_poseidon_merkle_proof};
-use zkasper_common::types::FinalityWitness;
+use zkasper_common::types::{Checkpoint, FinalityWitness};
 
 fn main() {
     let input = std::fs::read("input.bin").expect("read input.bin");
     let witness: FinalityWitness = bincode::deserialize(&input).expect("deserialize witness");
 
+    let checkpoint = verify_finality(&witness);
+
+    eprintln!(
+        "finalized: epoch={} root={:x?}",
+        checkpoint.epoch, checkpoint.root,
+    );
+}
+
+/// Core finality verification logic. Returns the finalized checkpoint.
+pub fn verify_finality(witness: &FinalityWitness) -> Checkpoint {
+    use zkasper_common::bls::{compute_signing_root, verify_aggregate_signature};
+    use zkasper_common::poseidon::{poseidon_leaf, verify_poseidon_merkle_proof};
+
     let mut attesting_balance: u64 = 0;
 
     for attestation in &witness.attestations {
-        let mut _pubkeys: Vec<[u8; 48]> = Vec::new();
+        let mut pubkeys: Vec<[u8; 48]> = Vec::new();
+        let mut last_index: Option<u64> = None;
 
         for v in &attestation.attesting_validators {
+            // Enforce strictly increasing validator indices to prevent
+            // double-counting the same validator within or across attestations
+            // that share the same signing root.
+            if let Some(prev) = last_index {
+                assert!(
+                    v.validator_index > prev,
+                    "validator indices must be strictly increasing: {} followed {}",
+                    v.validator_index,
+                    prev,
+                );
+            }
+            last_index = Some(v.validator_index);
+
             // Compute expected Poseidon leaf and verify against tree
             let expected_leaf = poseidon_leaf(&v.pubkey.0, v.active_effective_balance);
             assert!(
@@ -35,19 +60,14 @@ fn main() {
             );
 
             attesting_balance += v.active_effective_balance;
-            _pubkeys.push(v.pubkey.0);
+            pubkeys.push(v.pubkey.0);
         }
 
-        // Compute signing root
-        let _signing_root = compute_signing_root(
-            &attestation.attestation_data_root,
-            &witness.signing_domain,
-        );
+        // Compute signing root and verify aggregate BLS signature
+        let signing_root =
+            compute_signing_root(&attestation.attestation_data_root, &witness.signing_domain);
 
-        // TODO: BLS aggregate signature verification
-        // 1. aggregate_pubkeys(&pubkeys)
-        // 2. hash_to_g2(&signing_root)
-        // 3. pairing check: e(agg_pk, H(m)) == e(G1, sig)
+        verify_aggregate_signature(&pubkeys, &signing_root, &attestation.signature.0);
     }
 
     // Supermajority check
@@ -58,10 +78,5 @@ fn main() {
         witness.total_active_balance,
     );
 
-    // Output: finalized checkpoint
-    eprintln!(
-        "finalized: epoch={} root={:x?}",
-        witness.finalized_checkpoint.epoch,
-        witness.finalized_checkpoint.root,
-    );
+    witness.finalized_checkpoint.clone()
 }

@@ -100,8 +100,7 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], u64) {
 
     let validators_field_index = zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX;
 
-    let validators_root_1 =
-        list_hash_tree_root(&ssz_data_root_1, witness.validators_list_length_1);
+    let validators_root_1 = list_hash_tree_root(&ssz_data_root_1, witness.validators_list_length_1);
     let computed_state_root_1 = compute_ssz_merkle_root(
         &validators_root_1,
         validators_field_index,
@@ -112,8 +111,7 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], u64) {
         "state_root_1 mismatch"
     );
 
-    let validators_root_2 =
-        list_hash_tree_root(&ssz_data_root_2, witness.validators_list_length_2);
+    let validators_root_2 = list_hash_tree_root(&ssz_data_root_2, witness.validators_list_length_2);
     let computed_state_root_2 = compute_ssz_merkle_root(
         &validators_root_2,
         validators_field_index,
@@ -139,10 +137,7 @@ mod tests {
     /// Build a fake "state root" from a validators data tree root, list length,
     /// and a set of sibling hashes for the top-level BeaconState tree.
     /// Returns (state_root, siblings).
-    fn make_state_proof(
-        data_tree_root: &[u8; 32],
-        list_length: u64,
-    ) -> ([u8; 32], Vec<[u8; 32]>) {
+    fn make_state_proof(data_tree_root: &[u8; 32], list_length: u64) -> ([u8; 32], Vec<[u8; 32]>) {
         let validators_root = list_hash_tree_root(data_tree_root, list_length);
 
         // Fake a depth-5 BeaconState tree where field 11 is `validators`.
@@ -217,10 +212,8 @@ mod tests {
 
         // Build state proofs
         let num_validators = 4u64;
-        let (state_root_1, state_siblings_1) =
-            make_state_proof(&old_data_root, num_validators);
-        let (state_root_2, state_siblings_2) =
-            make_state_proof(&new_data_root, num_validators);
+        let (state_root_1, state_siblings_1) = make_state_proof(&old_data_root, num_validators);
+        let (state_root_2, state_siblings_2) = make_state_proof(&new_data_root, num_validators);
 
         let mutation = ValidatorMutation {
             validator_index: 1,

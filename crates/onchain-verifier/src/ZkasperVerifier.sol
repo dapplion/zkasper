@@ -10,6 +10,12 @@ interface IZiskVerifier {
 
 /// @title ZkasperVerifier
 /// @notice Tracks Ethereum beacon chain finality via ZK proofs of Casper FFG.
+///
+/// Public output layouts (uint32 arrays, little-endian packed):
+///
+///   Bootstrap:  [poseidon_root(8), total_active_balance(2), state_root(8)]
+///   EpochDiff:  [poseidon_root_2(8), total_active_balance_2(2), state_root_1(8), state_root_2(8)]
+///   Finality:   [epoch(2), checkpoint_root(8), poseidon_root(8), total_active_balance(2)]
 contract ZkasperVerifier {
     IZiskVerifier public immutable epochDiffVerifier;
     IZiskVerifier public immutable finalityVerifier;
@@ -37,49 +43,70 @@ contract ZkasperVerifier {
     }
 
     /// @notice One-time initialization from a trusted state root.
+    /// Public outputs: [poseidon_root(8), total_active_balance(2), state_root(8)]
     function bootstrap(
         bytes calldata proof,
-        uint32[] calldata publicOutputs,
-        bytes32 stateRoot
+        uint32[] calldata publicOutputs
     ) external {
         require(!initialized, "already initialized");
+        require(publicOutputs.length >= 18, "invalid outputs length");
         require(bootstrapVerifier.verify(proof, publicOutputs), "invalid proof");
 
         poseidonRoot = _extractBytes32(publicOutputs, 0);
         totalActiveBalance = _extractUint64(publicOutputs, 8);
-        latestStateRoot = stateRoot;
+        latestStateRoot = _extractBytes32(publicOutputs, 10);
         initialized = true;
 
-        emit Bootstrapped(stateRoot, poseidonRoot, totalActiveBalance);
+        emit Bootstrapped(latestStateRoot, poseidonRoot, totalActiveBalance);
     }
 
     /// @notice Submit an epoch diff proof to advance the accumulator.
+    /// Public outputs: [poseidon_root_2(8), total_active_balance_2(2), state_root_1(8), state_root_2(8)]
+    ///
+    /// The circuit proves the transition from state_root_1 to state_root_2.
+    /// The contract verifies state_root_1 matches the stored latestStateRoot,
+    /// and derives state_root_2 from the verified proof outputs (not calldata).
     function submitEpochDiff(
         bytes calldata proof,
-        uint32[] calldata publicOutputs,
-        bytes32 stateRoot1,
-        bytes32 stateRoot2
+        uint32[] calldata publicOutputs
     ) external {
         require(initialized, "not initialized");
-        require(stateRoot1 == latestStateRoot, "state root mismatch");
-
+        require(publicOutputs.length >= 26, "invalid outputs length");
         require(epochDiffVerifier.verify(proof, publicOutputs), "invalid proof");
 
+        // Verify the proof's state_root_1 matches our stored state
+        bytes32 provenStateRoot1 = _extractBytes32(publicOutputs, 10);
+        require(provenStateRoot1 == latestStateRoot, "state root 1 mismatch");
+
+        // Extract all outputs from the verified proof
         poseidonRoot = _extractBytes32(publicOutputs, 0);
         totalActiveBalance = _extractUint64(publicOutputs, 8);
-        latestStateRoot = stateRoot2;
+        latestStateRoot = _extractBytes32(publicOutputs, 18);
 
-        emit EpochDiffVerified(stateRoot2, poseidonRoot, totalActiveBalance);
+        emit EpochDiffVerified(latestStateRoot, poseidonRoot, totalActiveBalance);
     }
 
     /// @notice Submit a finality proof.
+    /// Public outputs: [epoch(2), checkpoint_root(8), poseidon_root(8), total_active_balance(2)]
+    ///
+    /// The contract verifies the proof was generated against the current
+    /// poseidon_root and total_active_balance, binding finality to the tracked
+    /// validator set.
     function submitFinality(
         bytes calldata proof,
         uint32[] calldata publicOutputs
     ) external {
         require(initialized, "not initialized");
+        require(publicOutputs.length >= 20, "invalid outputs length");
         require(finalityVerifier.verify(proof, publicOutputs), "invalid proof");
 
+        // Verify the proof was generated against our current accumulator state
+        bytes32 provenPoseidonRoot = _extractBytes32(publicOutputs, 10);
+        uint64 provenTotalBalance = _extractUint64(publicOutputs, 18);
+        require(provenPoseidonRoot == poseidonRoot, "poseidon root mismatch");
+        require(provenTotalBalance == totalActiveBalance, "total active balance mismatch");
+
+        // Extract finalized checkpoint from proof
         uint64 epoch = _extractUint64(publicOutputs, 0);
         bytes32 root = _extractBytes32(publicOutputs, 2);
 

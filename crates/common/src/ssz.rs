@@ -34,11 +34,7 @@ pub fn list_hash_tree_root(data_tree_root: &[u8; 32], length: u64) -> [u8; 32] {
 }
 
 /// Compute a SHA-256 Merkle root from leaf, index, and siblings.
-pub fn compute_ssz_merkle_root(
-    leaf: &[u8; 32],
-    index: u64,
-    siblings: &[[u8; 32]],
-) -> [u8; 32] {
+pub fn compute_ssz_merkle_root(leaf: &[u8; 32], index: u64, siblings: &[[u8; 32]]) -> [u8; 32] {
     merkle::compute_root(sha256_pair, leaf, index, siblings)
 }
 
@@ -228,8 +224,7 @@ mod tests {
             .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
             .collect();
 
-        let (tree_root, siblings) =
-            crate::test_utils::build_ssz_tree(&roots, 2);
+        let (tree_root, siblings) = crate::test_utils::build_ssz_tree(&roots, 2);
 
         for (i, root) in roots.iter().enumerate() {
             assert!(

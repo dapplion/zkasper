@@ -1,5 +1,8 @@
 //! Test helpers for building synthetic witness data.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::poseidon::poseidon_pair;
 use crate::ssz::{sha256_pair, u64_to_chunk};
 use crate::types::*;
@@ -111,10 +114,7 @@ pub fn build_ssz_tree(
 pub fn build_poseidon_tree(
     poseidon_leaves: &[[u8; 32]],
     depth: u32,
-) -> (
-    [u8; 32],
-    Vec<Vec<[u8; 32]>>,
-) {
+) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
     let capacity = 1usize << depth;
 
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];

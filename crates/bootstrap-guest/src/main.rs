@@ -60,7 +60,10 @@ pub fn verify_bootstrap_with_depth(witness: &BootstrapWitness, depth: u32) -> ([
         zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX,
         &witness.state_to_validators_siblings,
     );
-    assert_eq!(computed_state_root, witness.state_root, "state root mismatch");
+    assert_eq!(
+        computed_state_root, witness.state_root,
+        "state root mismatch"
+    );
 
     let poseidon_root = rebuild_tree_poseidon(&poseidon_leaves, depth);
 
@@ -138,10 +141,7 @@ mod tests {
 
     /// Build a fake state root from a validators data tree root.
     /// Same helper pattern as the epoch-diff test.
-    fn make_state_proof(
-        data_tree_root: &[u8; 32],
-        list_length: u64,
-    ) -> ([u8; 32], Vec<[u8; 32]>) {
+    fn make_state_proof(data_tree_root: &[u8; 32], list_length: u64) -> ([u8; 32], Vec<[u8; 32]>) {
         let validators_root = list_hash_tree_root(data_tree_root, list_length);
         let depth = 5;
         let mut siblings = Vec::with_capacity(depth);
@@ -175,10 +175,7 @@ mod tests {
         let pubkey_chunks: Vec<_> = validators.iter().map(make_pubkey_chunks).collect();
 
         // Build expected SSZ data tree root
-        let validator_roots: Vec<_> = field_chunks
-            .iter()
-            .map(validator_hash_tree_root)
-            .collect();
+        let validator_roots: Vec<_> = field_chunks.iter().map(validator_hash_tree_root).collect();
         let ssz_data_root = rebuild_tree_sha256(&validator_roots, depth);
 
         // Build expected Poseidon tree root
@@ -224,10 +221,7 @@ mod tests {
         let field_chunks: Vec<_> = validators.iter().map(make_field_leaves).collect();
         let pubkey_chunks: Vec<_> = validators.iter().map(make_pubkey_chunks).collect();
 
-        let validator_roots: Vec<_> = field_chunks
-            .iter()
-            .map(validator_hash_tree_root)
-            .collect();
+        let validator_roots: Vec<_> = field_chunks.iter().map(validator_hash_tree_root).collect();
         let ssz_data_root = rebuild_tree_sha256(&validator_roots, depth);
 
         let num_validators = 4u64;
