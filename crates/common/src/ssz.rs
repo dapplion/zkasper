@@ -125,14 +125,21 @@ pub fn verify_field_leaves(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{make_field_leaves, make_pubkey_chunks, make_validator};
 
     #[test]
     fn test_sha256_pair() {
         let a = [0u8; 32];
         let b = [0u8; 32];
         let result = sha256_pair(&a, &b);
-        // sha256 of 64 zero bytes — deterministic
         assert_ne!(result, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_sha256_pair_not_commutative() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        assert_ne!(sha256_pair(&a, &b), sha256_pair(&b, &a));
     }
 
     #[test]
@@ -143,12 +150,92 @@ mod tests {
     }
 
     #[test]
+    fn test_list_hash_tree_root_different_lengths() {
+        let data_root = [1u8; 32];
+        let a = list_hash_tree_root(&data_root, 100);
+        let b = list_hash_tree_root(&data_root, 101);
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn test_u64_to_chunk() {
-        let chunk = u64_to_chunk(32_000_000_000); // 32 ETH in Gwei
+        let chunk = u64_to_chunk(32_000_000_000);
         assert_eq!(
             u64::from_le_bytes(chunk[..8].try_into().unwrap()),
             32_000_000_000
         );
         assert_eq!(&chunk[8..], &[0u8; 24]);
+    }
+
+    #[test]
+    fn test_validator_hash_tree_root_deterministic() {
+        let v = make_validator(1, 32);
+        let leaves = make_field_leaves(&v);
+        let a = validator_hash_tree_root(&leaves);
+        let b = validator_hash_tree_root(&leaves);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_validator_hash_tree_root_changes_with_balance() {
+        let v1 = make_validator(1, 32);
+        let v2 = make_validator(1, 16);
+        let a = validator_hash_tree_root(&make_field_leaves(&v1));
+        let b = validator_hash_tree_root(&make_field_leaves(&v2));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_verify_field_leaves_valid() {
+        let v = make_validator(5, 32);
+        let leaves = make_field_leaves(&v);
+        let chunks = make_pubkey_chunks(&v);
+        // Should not panic
+        verify_field_leaves(&v, &leaves, &chunks);
+    }
+
+    #[test]
+    #[should_panic(expected = "effective_balance leaf mismatch")]
+    fn test_verify_field_leaves_wrong_balance() {
+        let v = make_validator(5, 32);
+        let mut leaves = make_field_leaves(&v);
+        // Tamper with the balance leaf
+        leaves[2] = u64_to_chunk(16_000_000_000);
+        let chunks = make_pubkey_chunks(&v);
+        verify_field_leaves(&v, &leaves, &chunks);
+    }
+
+    #[test]
+    #[should_panic(expected = "pubkey leaf mismatch")]
+    fn test_verify_field_leaves_wrong_pubkey() {
+        let v = make_validator(5, 32);
+        let leaves = make_field_leaves(&v);
+        let mut chunks = make_pubkey_chunks(&v);
+        // Tamper with pubkey chunk
+        chunks[0][0] = 0xFF;
+        verify_field_leaves(&v, &leaves, &chunks);
+    }
+
+    #[test]
+    fn test_ssz_merkle_proof_roundtrip() {
+        let v0 = make_validator(0, 32);
+        let v1 = make_validator(1, 32);
+        let v2 = make_validator(2, 32);
+        let v3 = make_validator(3, 32);
+
+        let roots: Vec<_> = [&v0, &v1, &v2, &v3]
+            .iter()
+            .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
+            .collect();
+
+        let (tree_root, siblings) =
+            crate::test_utils::build_ssz_tree(&roots, 2);
+
+        for (i, root) in roots.iter().enumerate() {
+            assert!(
+                verify_ssz_merkle_proof(root, i as u64, &siblings[i], &tree_root),
+                "proof failed for leaf {i}"
+            );
+        }
     }
 }

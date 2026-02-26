@@ -6,6 +6,8 @@ pub mod bls;
 pub mod merkle;
 pub mod poseidon;
 pub mod ssz;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 pub mod types;
 
 /// Beacon chain constants

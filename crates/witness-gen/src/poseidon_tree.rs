@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_build_small_tree() {
-        let validators: Vec<_> = (0..4).map(|i| dummy_validator(i)).collect();
+        let validators: Vec<_> = (0..4).map(dummy_validator).collect();
         let tree = PoseidonTree::build(&validators, 100, 2); // depth 2 for 4 leaves
         let root = tree.root();
         assert_ne!(root, [0u8; 32]);
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_update_leaf() {
-        let validators: Vec<_> = (0..4).map(|i| dummy_validator(i)).collect();
+        let validators: Vec<_> = (0..4).map(dummy_validator).collect();
         let mut tree = PoseidonTree::build(&validators, 100, 2);
         let old_root = tree.root();
 
@@ -122,7 +122,7 @@ mod tests {
     fn test_siblings_verify() {
         use zkasper_common::poseidon::verify_poseidon_merkle_proof;
 
-        let validators: Vec<_> = (0..4).map(|i| dummy_validator(i)).collect();
+        let validators: Vec<_> = (0..4).map(dummy_validator).collect();
         let tree = PoseidonTree::build(&validators, 100, 2);
 
         for i in 0..4u64 {

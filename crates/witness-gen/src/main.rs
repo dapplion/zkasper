@@ -1,10 +1,18 @@
+#[allow(dead_code)]
 mod beacon_api;
+#[allow(dead_code)]
 mod attestation_collector;
+#[allow(dead_code)]
 mod db;
+#[allow(dead_code)]
 mod poseidon_tree;
+#[allow(dead_code)]
 mod state_diff;
+#[allow(dead_code)]
 mod witness_bootstrap;
+#[allow(dead_code)]
 mod witness_epoch_diff;
+#[allow(dead_code)]
 mod witness_finality;
 
 use clap::{Parser, Subcommand};
