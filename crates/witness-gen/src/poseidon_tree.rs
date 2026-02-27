@@ -4,6 +4,7 @@
 //! with zero_hash chaining for the remaining levels up to the full depth.
 //! Supports incremental leaf updates and Merkle proof extraction.
 
+use rayon::prelude::*;
 use zkasper_common::poseidon::{poseidon_leaf, poseidon_pair};
 use zkasper_common::types::ValidatorData;
 
@@ -55,24 +56,26 @@ impl PoseidonTree {
         let dense_depth = ceil_log2(validators.len()).max(1).min(depth);
         let dense_capacity = 1usize << dense_depth;
 
-        // Compute leaves (only the dense portion)
-        let mut leaves = vec![[0u8; 32]; dense_capacity];
-        for (i, v) in validators.iter().enumerate() {
-            let active_balance = v.active_effective_balance(epoch);
-            leaves[i] = poseidon_leaf(&v.pubkey.0, active_balance);
-        }
+        // Compute leaves in parallel (only the dense portion)
+        let mut leaves: Vec<[u8; 32]> = validators
+            .par_iter()
+            .map(|v| {
+                let active_balance = v.active_effective_balance(epoch);
+                poseidon_leaf(&v.pubkey.0, active_balance)
+            })
+            .collect();
+        leaves.resize(dense_capacity, [0u8; 32]);
 
-        // Build levels bottom-up (0..dense_depth)
+        // Build levels bottom-up (0..dense_depth), parallelizing large levels
         let mut levels = Vec::with_capacity((dense_depth + 1) as usize);
         levels.push(leaves);
 
         for d in 0..dense_depth as usize {
             let prev = &levels[d];
-            let parent_count = prev.len() / 2;
-            let mut parents = Vec::with_capacity(parent_count);
-            for i in 0..parent_count {
-                parents.push(poseidon_pair(&prev[i * 2], &prev[i * 2 + 1]));
-            }
+            let parents: Vec<[u8; 32]> = prev
+                .par_chunks_exact(2)
+                .map(|pair| poseidon_pair(&pair[0], &pair[1]))
+                .collect();
             levels.push(parents);
         }
 

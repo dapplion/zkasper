@@ -53,35 +53,45 @@ pub fn make_pubkey_chunks(data: &ValidatorData) -> [[u8; 32]; 2] {
     [chunk0, chunk1]
 }
 
-/// Build a small Merkle tree (SHA-256) from validator roots and return
+/// Build a sparse Merkle tree (SHA-256) from validator roots and return
 /// (data_tree_root, siblings_per_leaf).
+///
+/// Only builds levels up to the dense portion (next-power-of-2 above leaf count),
+/// then uses precomputed zero hashes for the sparse levels above.
 pub fn build_ssz_tree(
     validator_roots: &[[u8; 32]],
     depth: u32,
 ) -> (
     [u8; 32],
     Vec<Vec<[u8; 32]>>, // siblings[leaf_index] = vec of siblings
-) {
-    let capacity = 1usize << depth;
-
+)
+{
     // Precompute zero hashes
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
     for d in 1..=depth as usize {
         zero_hashes[d] = sha256_pair(&zero_hashes[d - 1], &zero_hashes[d - 1]);
     }
 
-    // Build levels
-    let mut levels: Vec<Vec<[u8; 32]>> = Vec::new();
+    let dense_depth = if validator_roots.is_empty() {
+        1u32
+    } else {
+        (validator_roots.len() as u64)
+            .next_power_of_two()
+            .trailing_zeros()
+    }
+    .max(1)
+    .min(depth);
+    let dense_capacity = 1usize << dense_depth;
 
-    // Level 0: leaves
-    let mut leaves = vec![[0u8; 32]; capacity];
+    // Build dense levels
+    let mut levels: Vec<Vec<[u8; 32]>> = Vec::new();
+    let mut leaves = vec![[0u8; 32]; dense_capacity];
     for (i, root) in validator_roots.iter().enumerate() {
         leaves[i] = *root;
     }
-    // Fill remaining with zero_hashes[0]
     levels.push(leaves);
 
-    for d in 0..depth as usize {
+    for d in 0..dense_depth as usize {
         let prev = &levels[d];
         let parent_count = prev.len() / 2;
         let mut parents = Vec::with_capacity(parent_count);
@@ -91,17 +101,26 @@ pub fn build_ssz_tree(
         levels.push(parents);
     }
 
-    let root = levels[depth as usize][0];
+    // Chain through zero hashes for sparse levels
+    let mut root = levels[dense_depth as usize][0];
+    for d in dense_depth..depth {
+        root = sha256_pair(&root, &zero_hashes[d as usize]);
+    }
 
     // Extract siblings for each leaf
     let mut all_siblings = Vec::new();
     for leaf_idx in 0..validator_roots.len() {
         let mut siblings = Vec::with_capacity(depth as usize);
         let mut idx = leaf_idx;
-        for level in levels.iter().take(depth as usize) {
+        // Dense levels: read from stored levels
+        for level in levels.iter().take(dense_depth as usize) {
             let sibling_idx = idx ^ 1;
             siblings.push(level[sibling_idx]);
             idx >>= 1;
+        }
+        // Sparse levels: sibling is always the zero hash
+        for d in dense_depth..depth {
+            siblings.push(zero_hashes[d as usize]);
         }
         all_siblings.push(siblings);
     }
@@ -109,27 +128,152 @@ pub fn build_ssz_tree(
     (root, all_siblings)
 }
 
-/// Build a small Poseidon Merkle tree from leaves and return
+/// Build a SHA-256 multi-proof for the given leaf indices in a sparse tree.
+/// Returns `(data_tree_root, MerkleMultiProof)`.
+pub fn build_ssz_tree_multi_proof(
+    validator_roots: &[[u8; 32]],
+    depth: u32,
+    leaf_indices: &[u64],
+) -> ([u8; 32], crate::types::MerkleMultiProof) {
+    use alloc::collections::BTreeSet;
+
+    // Precompute zero hashes
+    let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
+    for d in 1..=depth as usize {
+        zero_hashes[d] = sha256_pair(&zero_hashes[d - 1], &zero_hashes[d - 1]);
+    }
+
+    let dense_depth = if validator_roots.is_empty() {
+        1u32
+    } else {
+        (validator_roots.len() as u64)
+            .next_power_of_two()
+            .trailing_zeros()
+    }
+    .max(1)
+    .min(depth);
+    let dense_capacity = 1usize << dense_depth;
+
+    // Build dense levels
+    let mut levels: Vec<Vec<[u8; 32]>> = Vec::new();
+    let mut leaves = vec![[0u8; 32]; dense_capacity];
+    for (i, root) in validator_roots.iter().enumerate() {
+        leaves[i] = *root;
+    }
+    levels.push(leaves);
+
+    for d in 0..dense_depth as usize {
+        let prev = &levels[d];
+        let parent_count = prev.len() / 2;
+        let mut parents = Vec::with_capacity(parent_count);
+        for i in 0..parent_count {
+            parents.push(sha256_pair(&prev[i * 2], &prev[i * 2 + 1]));
+        }
+        levels.push(parents);
+    }
+
+    // Chain through zero hashes for sparse levels
+    let mut root = levels[dense_depth as usize][0];
+    for d in dense_depth..depth {
+        root = sha256_pair(&root, &zero_hashes[d as usize]);
+    }
+
+    // Build auxiliaries: walk bottom-up, collect sibling nodes not in `known`
+    let mut known_at_level: BTreeSet<u64> = leaf_indices.iter().copied().collect();
+    let mut auxiliaries = Vec::new();
+
+    for level in 0..depth {
+        // Collect sorted parent indices
+        let parent_indices: BTreeSet<u64> = known_at_level.iter().map(|&idx| idx / 2).collect();
+
+        for &parent_idx in &parent_indices {
+            let left_idx = parent_idx * 2;
+            let right_idx = parent_idx * 2 + 1;
+
+            if !known_at_level.contains(&left_idx) {
+                let node = get_node_hash(&levels, &zero_hashes, level, left_idx, dense_depth);
+                auxiliaries.push(node);
+            }
+            if !known_at_level.contains(&right_idx) {
+                let node = get_node_hash(&levels, &zero_hashes, level, right_idx, dense_depth);
+                auxiliaries.push(node);
+            }
+        }
+
+        known_at_level = parent_indices;
+    }
+
+    (root, crate::types::MerkleMultiProof { auxiliaries })
+}
+
+/// Get a node hash from the tree at a given level and index.
+fn get_node_hash(
+    levels: &[Vec<[u8; 32]>],
+    zero_hashes: &[[u8; 32]],
+    level: u32,
+    idx: u64,
+    dense_depth: u32,
+) -> [u8; 32] {
+    if level < dense_depth {
+        let level_data = &levels[level as usize];
+        if (idx as usize) < level_data.len() {
+            level_data[idx as usize]
+        } else {
+            zero_hashes[level as usize]
+        }
+    } else {
+        // Sparse levels: only index 0 is the actual node, everything else is zero hash
+        if idx == 0 {
+            // This is the dense root chained through zero hashes — but since we're
+            // collecting it as an auxiliary, we can read from levels[dense_depth][0]
+            // chained up. Actually for sparse levels, index 1 (the sibling) is always
+            // the zero hash at that level.
+            if level == dense_depth {
+                levels[dense_depth as usize][0]
+            } else {
+                // This shouldn't happen — the only node at index 0 in sparse levels
+                // is an ancestor of all leaves, so it should always be in `known`.
+                zero_hashes[level as usize]
+            }
+        } else {
+            zero_hashes[level as usize]
+        }
+    }
+}
+
+/// Build a sparse Poseidon Merkle tree from leaves and return
 /// (root, siblings_per_leaf).
+///
+/// Only builds levels up to the dense portion (next-power-of-2 above leaf count),
+/// then uses precomputed zero hashes for the sparse levels above.
 pub fn build_poseidon_tree(
     poseidon_leaves: &[[u8; 32]],
     depth: u32,
 ) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
-    let capacity = 1usize << depth;
-
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
     for d in 1..=depth as usize {
         zero_hashes[d] = poseidon_pair(&zero_hashes[d - 1], &zero_hashes[d - 1]);
     }
 
+    let dense_depth = if poseidon_leaves.is_empty() {
+        1u32
+    } else {
+        (poseidon_leaves.len() as u64)
+            .next_power_of_two()
+            .trailing_zeros()
+    }
+    .max(1)
+    .min(depth);
+    let dense_capacity = 1usize << dense_depth;
+
     let mut levels: Vec<Vec<[u8; 32]>> = Vec::new();
-    let mut leaves = vec![[0u8; 32]; capacity];
+    let mut leaves = vec![[0u8; 32]; dense_capacity];
     for (i, leaf) in poseidon_leaves.iter().enumerate() {
         leaves[i] = *leaf;
     }
     levels.push(leaves);
 
-    for d in 0..depth as usize {
+    for d in 0..dense_depth as usize {
         let prev = &levels[d];
         let parent_count = prev.len() / 2;
         let mut parents = Vec::with_capacity(parent_count);
@@ -139,16 +283,25 @@ pub fn build_poseidon_tree(
         levels.push(parents);
     }
 
-    let root = levels[depth as usize][0];
+    // Chain through zero hashes for sparse levels
+    let mut root = levels[dense_depth as usize][0];
+    for d in dense_depth..depth {
+        root = poseidon_pair(&root, &zero_hashes[d as usize]);
+    }
 
     let mut all_siblings = Vec::new();
     for leaf_idx in 0..poseidon_leaves.len() {
         let mut siblings = Vec::with_capacity(depth as usize);
         let mut idx = leaf_idx;
-        for level in levels.iter().take(depth as usize) {
+        // Dense levels
+        for level in levels.iter().take(dense_depth as usize) {
             let sibling_idx = idx ^ 1;
             siblings.push(level[sibling_idx]);
             idx >>= 1;
+        }
+        // Sparse levels
+        for d in dense_depth..depth {
+            siblings.push(zero_hashes[d as usize]);
         }
         all_siblings.push(siblings);
     }

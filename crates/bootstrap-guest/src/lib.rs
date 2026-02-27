@@ -57,48 +57,51 @@ pub fn verify_bootstrap_with_depth(
 }
 
 /// Generic bottom-up Merkle tree rebuild with zero-hash padding.
+///
+/// Only builds the dense portion (next-power-of-2 above `leaves.len()`),
+/// then chains through precomputed zero hashes for the remaining sparse levels.
 fn rebuild_tree(
     leaves: &[[u8; 32]],
     hash_pair: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
     depth: u32,
 ) -> [u8; 32] {
-    let capacity = 1u64 << depth;
-
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
     for d in 1..=depth as usize {
         zero_hashes[d] = hash_pair(&zero_hashes[d - 1], &zero_hashes[d - 1]);
     }
 
-    let mut current_level: Vec<[u8; 32]> = Vec::with_capacity(leaves.len());
+    if leaves.is_empty() {
+        return zero_hashes[depth as usize];
+    }
+
+    // Only build levels up to the dense portion
+    let dense_depth = (leaves.len() as u64)
+        .next_power_of_two()
+        .trailing_zeros()
+        .max(1)
+        .min(depth);
+    let dense_capacity = 1usize << dense_depth;
+
+    // Pad leaves to dense capacity with zeros
+    let mut current_level = Vec::with_capacity(dense_capacity);
     current_level.extend_from_slice(leaves);
+    current_level.resize(dense_capacity, [0u8; 32]);
 
-    #[allow(clippy::needless_range_loop)]
-    for d in 0..depth as usize {
-        let level_size = (capacity >> d) as usize;
-        let parent_count = level_size / 2;
+    // Build dense levels bottom-up
+    for _d in 0..dense_depth as usize {
+        let parent_count = current_level.len() / 2;
         let mut next_level = Vec::with_capacity(parent_count);
-
         for i in 0..parent_count {
-            let left_idx = i * 2;
-            let right_idx = left_idx + 1;
-
-            let left = if left_idx < current_level.len() {
-                current_level[left_idx]
-            } else {
-                zero_hashes[d]
-            };
-            let right = if right_idx < current_level.len() {
-                current_level[right_idx]
-            } else {
-                zero_hashes[d]
-            };
-
-            next_level.push(hash_pair(&left, &right));
+            next_level.push(hash_pair(&current_level[i * 2], &current_level[i * 2 + 1]));
         }
-
         current_level = next_level;
     }
 
-    assert_eq!(current_level.len(), 1);
-    current_level[0]
+    // Chain through zero hashes for sparse levels
+    let mut root = current_level[0];
+    for d in dense_depth..depth {
+        root = hash_pair(&root, &zero_hashes[d as usize]);
+    }
+
+    root
 }
