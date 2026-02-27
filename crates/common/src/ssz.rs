@@ -28,6 +28,42 @@ pub fn validator_hash_tree_root(field_leaves: &[[u8; 32]; 8]) -> [u8; 32] {
     sha256_pair(&n4, &n5)
 }
 
+/// Compute both old and new validator hash tree roots, sharing intermediate
+/// SHA-256 computations when subtrees are identical.
+///
+/// For activity-only mutations (no SSZ field changes), this does 7 hashes
+/// instead of 14. For single-field changes (e.g. effective_balance), ~10
+/// instead of 14.
+pub fn validator_hash_tree_root_pair(
+    old_leaves: &[[u8; 32]; 8],
+    new_leaves: &[[u8; 32]; 8],
+) -> ([u8; 32], [u8; 32]) {
+    // level 2 (4 nodes)
+    let (old_n0, new_n0) = shared_sha256_pair(&old_leaves[0], &old_leaves[1], &new_leaves[0], &new_leaves[1]);
+    let (old_n1, new_n1) = shared_sha256_pair(&old_leaves[2], &old_leaves[3], &new_leaves[2], &new_leaves[3]);
+    let (old_n2, new_n2) = shared_sha256_pair(&old_leaves[4], &old_leaves[5], &new_leaves[4], &new_leaves[5]);
+    let (old_n3, new_n3) = shared_sha256_pair(&old_leaves[6], &old_leaves[7], &new_leaves[6], &new_leaves[7]);
+    // level 1
+    let (old_n4, new_n4) = shared_sha256_pair(&old_n0, &old_n1, &new_n0, &new_n1);
+    let (old_n5, new_n5) = shared_sha256_pair(&old_n2, &old_n3, &new_n2, &new_n3);
+    // root
+    shared_sha256_pair(&old_n4, &old_n5, &new_n4, &new_n5)
+}
+
+/// Hash two pairs, but compute only once if both pairs are identical.
+#[inline]
+fn shared_sha256_pair(
+    old_l: &[u8; 32], old_r: &[u8; 32],
+    new_l: &[u8; 32], new_r: &[u8; 32],
+) -> ([u8; 32], [u8; 32]) {
+    if old_l == new_l && old_r == new_r {
+        let h = sha256_pair(new_l, new_r);
+        (h, h)
+    } else {
+        (sha256_pair(old_l, old_r), sha256_pair(new_l, new_r))
+    }
+}
+
 /// SSZ List hash_tree_root: `sha256(data_tree_root || le_pad32(length))`.
 pub fn list_hash_tree_root(data_tree_root: &[u8; 32], length: u64) -> [u8; 32] {
     let mut length_chunk = [0u8; 32];
@@ -78,6 +114,9 @@ pub fn u64_to_chunk(val: u64) -> [u8; 32] {
 ///
 /// Leaves 1, 3, 4, 7 are opaque (withdrawal_credentials, slashed,
 /// activation_eligibility_epoch, withdrawable_epoch).
+///
+/// For a cheaper variant that skips the pubkey SHA-256 hash (when pubkey is
+/// known to match another already-verified set), use [`verify_field_leaves_no_pubkey_hash`].
 pub fn verify_field_leaves(
     data: &ValidatorData,
     field_leaves: &[[u8; 32]; 8],
@@ -123,6 +162,51 @@ pub fn verify_field_leaves(
     );
 
     // exit_epoch
+    assert_eq!(
+        field_leaves[6],
+        u64_to_chunk(data.exit_epoch),
+        "exit_epoch leaf mismatch"
+    );
+}
+
+/// Like [`verify_field_leaves`] but skips the pubkey SHA-256 hash.
+///
+/// Use when the pubkey leaf has already been verified elsewhere (e.g. the
+/// new validator's field_leaves were verified with [`verify_field_leaves`]
+/// and we know old_field_leaves[0] == new_field_leaves[0] because pubkeys
+/// don't change for existing validators).
+pub fn verify_field_leaves_no_pubkey_hash(
+    data: &ValidatorData,
+    field_leaves: &[[u8; 32]; 8],
+    pubkey_chunks: &[[u8; 32]; 2],
+) {
+    // pubkey raw bytes match the chunks (no SHA-256 needed)
+    assert_eq!(
+        &pubkey_chunks[0][..32],
+        &data.pubkey.0[..32],
+        "pubkey chunk 0 mismatch"
+    );
+    assert_eq!(
+        &pubkey_chunks[1][..16],
+        &data.pubkey.0[32..48],
+        "pubkey chunk 1 mismatch"
+    );
+    assert_eq!(
+        &pubkey_chunks[1][16..],
+        &[0u8; 16],
+        "pubkey chunk 1 padding not zero"
+    );
+
+    assert_eq!(
+        field_leaves[2],
+        u64_to_chunk(data.effective_balance),
+        "effective_balance leaf mismatch"
+    );
+    assert_eq!(
+        field_leaves[5],
+        u64_to_chunk(data.activation_epoch),
+        "activation_epoch leaf mismatch"
+    );
     assert_eq!(
         field_leaves[6],
         u64_to_chunk(data.exit_epoch),

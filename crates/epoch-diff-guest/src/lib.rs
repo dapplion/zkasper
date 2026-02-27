@@ -15,7 +15,8 @@ pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> (
     use zkasper_common::poseidon::{compute_poseidon_merkle_root, poseidon_leaf};
     use zkasper_common::ssz::{
         compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root,
-        verify_field_leaves, verify_ssz_multi_proof,
+        validator_hash_tree_root_pair, verify_field_leaves, verify_field_leaves_no_pubkey_hash,
+        verify_ssz_multi_proof,
     };
 
     let mut poseidon_root = witness.poseidon_root_1;
@@ -44,15 +45,43 @@ pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> (
                 "Poseidon root mismatch before new validator {}",
                 idx
             );
-        } else {
-            // -- Verify old validator field leaves --
+
+            // -- Verify new field leaves + compute new HTR --
             verify_field_leaves(
+                &mutation.new_data,
+                &mutation.new_field_leaves,
+                &mutation.new_pubkey_chunks,
+            );
+            let new_validator_root = validator_hash_tree_root(&mutation.new_field_leaves);
+            new_ssz_leaves.push((new_validator_root, idx));
+        } else {
+            // -- Verify new field leaves (full, including pubkey hash) --
+            verify_field_leaves(
+                &mutation.new_data,
+                &mutation.new_field_leaves,
+                &mutation.new_pubkey_chunks,
+            );
+
+            // -- Verify old field leaves (skip pubkey hash — pubkey doesn't change) --
+            verify_field_leaves_no_pubkey_hash(
                 &mutation.old_data,
                 &mutation.old_field_leaves,
                 &mutation.old_pubkey_chunks,
             );
-            let old_validator_root = validator_hash_tree_root(&mutation.old_field_leaves);
+            // Ensure pubkey leaf matches (no SHA-256 — just comparison)
+            assert_eq!(
+                mutation.old_field_leaves[0], mutation.new_field_leaves[0],
+                "pubkey leaf changed for existing validator {}",
+                idx
+            );
+
+            // -- Compute old + new HTR, sharing work for identical subtrees --
+            let (old_validator_root, new_validator_root) = validator_hash_tree_root_pair(
+                &mutation.old_field_leaves,
+                &mutation.new_field_leaves,
+            );
             old_ssz_leaves.push((old_validator_root, idx));
+            new_ssz_leaves.push((new_validator_root, idx));
 
             // -- Verify and update Poseidon accumulator (old) --
             let old_active_balance = mutation.old_data.active_effective_balance(epoch_old);
@@ -65,15 +94,6 @@ pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> (
                 idx
             );
         }
-
-        // -- Verify new validator field leaves --
-        verify_field_leaves(
-            &mutation.new_data,
-            &mutation.new_field_leaves,
-            &mutation.new_pubkey_chunks,
-        );
-        let new_validator_root = validator_hash_tree_root(&mutation.new_field_leaves);
-        new_ssz_leaves.push((new_validator_root, idx));
 
         // -- Update Poseidon accumulator (new) --
         let new_active_balance = mutation.new_data.active_effective_balance(epoch_new);
