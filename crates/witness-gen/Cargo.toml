@@ -24,10 +24,18 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
+tracing = "0.1"
+rayon = "1"
 hex = "0.4"
 async-trait = "0.1"
 
+[features]
+default = []
+count-ops = ["zkasper-common/count-ops"]
+
 [dev-dependencies]
-zkasper-bootstrap-guest = { path = "../bootstrap-guest" }
-zkasper-epoch-diff-guest = { path = "../epoch-diff-guest" }
+zkasper-bootstrap-guest = { path = "../bootstrap-guest", features = ["count-ops"] }
+zkasper-epoch-diff-guest = { path = "../epoch-diff-guest", features = ["count-ops"] }
+zkasper-common = { path = "../common", features = ["test-utils", "count-ops"] }
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

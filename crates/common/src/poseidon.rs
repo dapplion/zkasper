@@ -11,6 +11,8 @@ use crate::merkle;
 /// - `pubkey_hi`: last 16 bytes of BLS pubkey (zero-padded to 32) as Fr
 /// - `active_effective_balance`: u64 balance (0 if inactive)
 pub fn poseidon_leaf(pubkey: &[u8; 48], active_eff_balance: u64) -> [u8; 32] {
+    #[cfg(feature = "count-ops")]
+    crate::op_counter::inc_poseidon_t4();
     let pubkey_lo = Fr::from_le_bytes_mod_order(&pubkey[..32]);
     let pubkey_hi = {
         let mut buf = [0u8; 32];
@@ -29,6 +31,8 @@ pub fn poseidon_leaf(pubkey: &[u8; 48], active_eff_balance: u64) -> [u8; 32] {
 
 /// Poseidon hash of two field elements (for Merkle tree internal nodes).
 pub fn poseidon_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    #[cfg(feature = "count-ops")]
+    crate::op_counter::inc_poseidon_t3();
     let l = Fr::from_le_bytes_mod_order(left);
     let r = Fr::from_le_bytes_mod_order(right);
 

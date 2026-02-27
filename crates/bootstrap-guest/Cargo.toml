@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "zkasper-bootstrap-guest"
 path = "src/main.rs"
 
+[features]
+default = []
+count-ops = ["zkasper-common/count-ops"]
+
 [dependencies]
 zkasper-common = { path = "../common", default-features = false }
 serde = { workspace = true }

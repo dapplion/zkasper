@@ -4,6 +4,8 @@ extern crate alloc;
 
 pub mod bls;
 pub mod merkle;
+#[cfg(feature = "count-ops")]
+pub mod op_counter;
 pub mod poseidon;
 pub mod ssz;
 #[cfg(any(test, feature = "test-utils"))]

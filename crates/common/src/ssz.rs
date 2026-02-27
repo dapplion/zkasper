@@ -5,6 +5,8 @@ use crate::types::ValidatorData;
 
 /// SHA-256 hash of two concatenated 32-byte inputs.
 pub fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    #[cfg(feature = "count-ops")]
+    crate::op_counter::inc_sha256();
     let mut hasher = Sha256::new();
     hasher.update(left);
     hasher.update(right);
@@ -46,6 +48,16 @@ pub fn verify_ssz_merkle_proof(
     root: &[u8; 32],
 ) -> bool {
     merkle::verify_proof(sha256_pair, leaf, index, siblings, root)
+}
+
+/// Verify multiple leaves against a single SHA-256 Merkle root using a multi-proof.
+/// Returns the computed root.
+pub fn verify_ssz_multi_proof(
+    leaves: &[([u8; 32], u64)],
+    proof: &crate::types::MerkleMultiProof,
+    depth: u32,
+) -> [u8; 32] {
+    merkle::verify_multi_proof(sha256_pair, leaves, proof, depth)
 }
 
 /// Pad a u64 value to a 32-byte LE SSZ chunk.

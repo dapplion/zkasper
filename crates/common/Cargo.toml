@@ -7,6 +7,7 @@ edition.workspace = true
 default = ["std"]
 std = []
 test-utils = []
+count-ops = []
 
 [dependencies]
 serde = { workspace = true }
