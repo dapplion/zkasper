@@ -63,7 +63,8 @@ mod tests {
 
     #[test]
     fn test_epoch_diff_single_mutation() {
-        let depth = 2u32;
+        use zkasper_common::constants::VALIDATORS_TREE_DEPTH;
+        let depth = VALIDATORS_TREE_DEPTH;
         let epoch_old = 100u64;
         let epoch_new = 101u64;
 
@@ -80,13 +81,15 @@ mod tests {
             .iter()
             .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
             .collect();
-        let (old_data_root, old_ssz_siblings) = build_ssz_tree(&old_roots, depth);
+        let (old_data_root, ssz_multi_proof_1) =
+            build_ssz_tree_multi_proof(&old_roots, depth, &[1]);
 
         let new_roots: Vec<_> = [&v0, &v1_new, &v2, &v3]
             .iter()
             .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
             .collect();
-        let (new_data_root, new_ssz_siblings) = build_ssz_tree(&new_roots, depth);
+        let (new_data_root, ssz_multi_proof_2) =
+            build_ssz_tree_multi_proof(&new_roots, depth, &[1]);
 
         let old_poseidon_leaves: Vec<_> = [&v0, &v1_old, &v2, &v3]
             .iter()
@@ -114,8 +117,6 @@ mod tests {
             new_field_leaves: make_field_leaves(&v1_new),
             old_pubkey_chunks: make_pubkey_chunks(&v1_old),
             new_pubkey_chunks: make_pubkey_chunks(&v1_new),
-            old_ssz_siblings: old_ssz_siblings[1].clone(),
-            new_ssz_siblings: new_ssz_siblings[1].clone(),
             poseidon_siblings: poseidon_siblings[1].clone(),
         };
 
@@ -133,6 +134,8 @@ mod tests {
             validators_list_length_1: num_validators,
             validators_list_length_2: num_validators,
             mutations: vec![mutation],
+            ssz_multi_proof_1,
+            ssz_multi_proof_2,
         };
 
         let (commitment, new_poseidon_root, new_total_balance) = verify_epoch_diff(&witness);

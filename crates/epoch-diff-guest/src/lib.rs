@@ -1,12 +1,21 @@
 // Re-export verification functions for use by integration tests and other crates.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use zkasper_common::types::EpochDiffWitness;
 
 /// Core epoch-diff verification logic. Returns (new_accumulator_commitment, new_poseidon_root, new_total_active_balance).
 pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64) {
+    verify_epoch_diff_with_depth(witness, zkasper_common::constants::VALIDATORS_TREE_DEPTH)
+}
+
+/// Epoch-diff verification with configurable validators tree depth.
+pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> ([u8; 32], [u8; 32], u64) {
     use zkasper_common::poseidon::{compute_poseidon_merkle_root, poseidon_leaf};
     use zkasper_common::ssz::{
-        compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root, verify_field_leaves,
+        compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root,
+        verify_field_leaves, verify_ssz_multi_proof,
     };
 
     let mut poseidon_root = witness.poseidon_root_1;
@@ -14,8 +23,10 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
     let epoch_old = witness.epoch_1;
     let epoch_new = witness.epoch_2;
 
-    let mut ssz_data_root_1: Option<[u8; 32]> = None;
-    let mut ssz_data_root_2: Option<[u8; 32]> = None;
+    // Phase 1: Per-mutation validation + Poseidon updates (sequential)
+    // Collect SSZ leaves for multi-proof verification
+    let mut old_ssz_leaves: Vec<([u8; 32], u64)> = Vec::with_capacity(witness.mutations.len());
+    let mut new_ssz_leaves: Vec<([u8; 32], u64)> = Vec::with_capacity(witness.mutations.len());
 
     for mutation in &witness.mutations {
         let idx = mutation.validator_index;
@@ -23,13 +34,7 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
         if mutation.is_new {
             // New validator: old leaf is all-zeros in both SSZ and Poseidon trees
             let zero_leaf = [0u8; 32];
-            let old_data_root =
-                compute_ssz_merkle_root(&zero_leaf, idx, &mutation.old_ssz_siblings);
-
-            match ssz_data_root_1 {
-                None => ssz_data_root_1 = Some(old_data_root),
-                Some(r) => assert_eq!(r, old_data_root, "SSZ data root 1 mismatch (new validator)"),
-            }
+            old_ssz_leaves.push((zero_leaf, idx));
 
             // Verify Poseidon: old leaf is zero
             let computed_old_root =
@@ -40,20 +45,14 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
                 idx
             );
         } else {
-            // -- Verify old validator against SSZ tree 1 --
+            // -- Verify old validator field leaves --
             verify_field_leaves(
                 &mutation.old_data,
                 &mutation.old_field_leaves,
                 &mutation.old_pubkey_chunks,
             );
             let old_validator_root = validator_hash_tree_root(&mutation.old_field_leaves);
-            let old_data_root =
-                compute_ssz_merkle_root(&old_validator_root, idx, &mutation.old_ssz_siblings);
-
-            match ssz_data_root_1 {
-                None => ssz_data_root_1 = Some(old_data_root),
-                Some(r) => assert_eq!(r, old_data_root, "SSZ data root 1 mismatch"),
-            }
+            old_ssz_leaves.push((old_validator_root, idx));
 
             // -- Verify and update Poseidon accumulator (old) --
             let old_active_balance = mutation.old_data.active_effective_balance(epoch_old);
@@ -67,20 +66,14 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
             );
         }
 
-        // -- Verify new validator against SSZ tree 2 --
+        // -- Verify new validator field leaves --
         verify_field_leaves(
             &mutation.new_data,
             &mutation.new_field_leaves,
             &mutation.new_pubkey_chunks,
         );
         let new_validator_root = validator_hash_tree_root(&mutation.new_field_leaves);
-        let new_data_root =
-            compute_ssz_merkle_root(&new_validator_root, idx, &mutation.new_ssz_siblings);
-
-        match ssz_data_root_2 {
-            None => ssz_data_root_2 = Some(new_data_root),
-            Some(r) => assert_eq!(r, new_data_root, "SSZ data root 2 mismatch"),
-        }
+        new_ssz_leaves.push((new_validator_root, idx));
 
         // -- Update Poseidon accumulator (new) --
         let new_active_balance = mutation.new_data.active_effective_balance(epoch_new);
@@ -97,10 +90,11 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
         total_active_balance = total_active_balance - old_active_balance + new_active_balance;
     }
 
-    // -- Verify SSZ data tree roots link to state roots --
-    let ssz_data_root_1 = ssz_data_root_1.expect("no mutations");
-    let ssz_data_root_2 = ssz_data_root_2.expect("no mutations");
+    // Phase 2: SSZ multi-proof verification
+    let ssz_data_root_1 = verify_ssz_multi_proof(&old_ssz_leaves, &witness.ssz_multi_proof_1, depth);
+    let ssz_data_root_2 = verify_ssz_multi_proof(&new_ssz_leaves, &witness.ssz_multi_proof_2, depth);
 
+    // -- Verify SSZ data tree roots link to state roots --
     let validators_field_index = zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX;
 
     let validators_root_1 = list_hash_tree_root(&ssz_data_root_1, witness.validators_list_length_1);

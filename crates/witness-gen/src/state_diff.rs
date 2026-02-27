@@ -1,9 +1,10 @@
 //! Diff two beacon state validator registries and produce SSZ Merkle proofs.
 
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 
+use rayon::prelude::*;
 use zkasper_common::ssz::{sha256_pair, u64_to_chunk, validator_hash_tree_root};
-use zkasper_common::types::{BlsPubkey, ValidatorData};
+use zkasper_common::types::{BlsPubkey, MerkleMultiProof, ValidatorData};
 
 use crate::beacon_api::ValidatorResponse;
 
@@ -115,19 +116,17 @@ pub fn find_mutations(
 // SSZ tree building
 // ---------------------------------------------------------------------------
 
-/// Build a sparse SHA-256 Merkle tree from validator roots and extract siblings
-/// for the requested leaf indices.
+/// Build a sparse SHA-256 Merkle tree from validator roots and return
+/// `(data_tree_root, MerkleMultiProof)` for the given leaf indices.
 ///
 /// Only allocates the dense portion (2^ceil(log2(n)) leaves), then chains
 /// zero hashes for the remaining depth. This allows depth=40 with millions
 /// of validators without allocating 2^40 entries.
-///
-/// Returns `(data_tree_root, index → siblings)`.
 pub fn build_validators_ssz_tree(
     validator_roots: &[[u8; 32]],
     depth: u32,
-    extract_indices: &[u64],
-) -> ([u8; 32], HashMap<u64, Vec<[u8; 32]>>) {
+    leaf_indices: &[u64],
+) -> ([u8; 32], MerkleMultiProof) {
     // Precompute zero hashes
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
     for d in 1..=depth as usize {
@@ -156,11 +155,10 @@ pub fn build_validators_ssz_tree(
 
     for d in 0..dense_depth as usize {
         let prev = &levels[d];
-        let parent_count = prev.len() / 2;
-        let mut parents = Vec::with_capacity(parent_count);
-        for i in 0..parent_count {
-            parents.push(sha256_pair(&prev[i * 2], &prev[i * 2 + 1]));
-        }
+        let parents: Vec<[u8; 32]> = prev
+            .par_chunks_exact(2)
+            .map(|pair| sha256_pair(&pair[0], &pair[1]))
+            .collect();
         levels.push(parents);
     }
 
@@ -170,34 +168,58 @@ pub fn build_validators_ssz_tree(
         root = sha256_pair(&root, &zero_hashes[d as usize]);
     }
 
-    // Extract siblings for requested indices
-    let mut result = HashMap::new();
-    for &leaf_idx in extract_indices {
-        let mut siblings = Vec::with_capacity(depth as usize);
-        let mut idx = leaf_idx as usize;
+    // Build multi-proof: collect auxiliary nodes bottom-up, left-to-right
+    let mut known_at_level: BTreeSet<u64> = leaf_indices.iter().copied().collect();
+    let mut auxiliaries = Vec::new();
 
-        // Dense levels
-        for level in levels.iter().take(dense_depth as usize) {
-            let sibling_idx = idx ^ 1;
-            siblings.push(level[sibling_idx]);
-            idx >>= 1;
+    for level in 0..depth {
+        let parent_indices: BTreeSet<u64> = known_at_level.iter().map(|&idx| idx / 2).collect();
+
+        for &parent_idx in &parent_indices {
+            let left_idx = parent_idx * 2;
+            let right_idx = parent_idx * 2 + 1;
+
+            if !known_at_level.contains(&left_idx) {
+                auxiliaries.push(get_node_hash(&levels, &zero_hashes, level, left_idx, dense_depth));
+            }
+            if !known_at_level.contains(&right_idx) {
+                auxiliaries.push(get_node_hash(&levels, &zero_hashes, level, right_idx, dense_depth));
+            }
         }
 
-        // Sparse levels
-        for d in dense_depth..depth {
-            siblings.push(zero_hashes[d as usize]);
-        }
-
-        result.insert(leaf_idx, siblings);
+        known_at_level = parent_indices;
     }
 
-    (root, result)
+    (root, MerkleMultiProof { auxiliaries })
+}
+
+/// Look up a node hash from the built tree levels or zero hashes.
+fn get_node_hash(
+    levels: &[Vec<[u8; 32]>],
+    zero_hashes: &[[u8; 32]],
+    level: u32,
+    idx: u64,
+    dense_depth: u32,
+) -> [u8; 32] {
+    if level < dense_depth {
+        let level_data = &levels[level as usize];
+        if (idx as usize) < level_data.len() {
+            level_data[idx as usize]
+        } else {
+            zero_hashes[level as usize]
+        }
+    } else {
+        // Sparse levels: sibling is always the zero hash (the only real node
+        // at each sparse level is on the path from dense root to full root,
+        // which is always in `known`).
+        zero_hashes[level as usize]
+    }
 }
 
 /// Build all validator roots from API responses.
 pub fn build_validator_roots(validators: &[ValidatorResponse]) -> Vec<[u8; 32]> {
     validators
-        .iter()
+        .par_iter()
         .map(|v| validator_hash_tree_root(&validator_response_to_field_leaves(v)))
         .collect()
 }

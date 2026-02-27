@@ -165,7 +165,7 @@ async fn test_bootstrap_round_trip() {
     mock.validators.insert(slot.to_string(), responses.clone());
     mock.headers.insert(slot.to_string(), header);
 
-    let (witness, tree, total_active_balance, num_validators) =
+    let (witness, tree, _epoch_state, total_active_balance, num_validators) =
         zkasper_witness_gen::witness_bootstrap::build(&mock, slot, TEST_DEPTH)
             .await
             .unwrap();
@@ -222,7 +222,7 @@ async fn test_epoch_diff_round_trip() {
     mock.headers.insert(slot_2.to_string(), header_2);
 
     // First bootstrap to build the PoseidonTree
-    let (_, mut tree, total_active_balance_1, _) =
+    let (_, mut tree, epoch_state, total_active_balance_1, _) =
         zkasper_witness_gen::witness_bootstrap::build(&mock, slot_1, TEST_DEPTH)
             .await
             .unwrap();
@@ -230,11 +230,11 @@ async fn test_epoch_diff_round_trip() {
     let old_root = tree.root();
 
     // Then epoch diff
-    let (witness, new_total_active_balance, new_num_validators) =
+    let (witness, _new_epoch_state, new_total_active_balance, new_num_validators) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &mock,
             &mut tree,
-            slot_1,
+            &epoch_state,
             slot_2,
             total_active_balance_1,
             TEST_DEPTH,
@@ -249,7 +249,7 @@ async fn test_epoch_diff_round_trip() {
 
     // Verify with epoch-diff guest verification function
     let (commitment, poseidon_root, balance) =
-        zkasper_epoch_diff_guest::verify_epoch_diff(&witness);
+        zkasper_epoch_diff_guest::verify_epoch_diff_with_depth(&witness, TEST_DEPTH);
 
     assert_eq!(poseidon_root, tree.root());
     assert_eq!(balance, new_total_active_balance);
@@ -295,7 +295,7 @@ async fn test_full_pipeline_bootstrap_then_epoch_diff() {
     mock.headers.insert(slot_2.to_string(), header_2);
 
     // Bootstrap
-    let (bootstrap_witness, tree, total_active_balance, num_validators) =
+    let (bootstrap_witness, tree, _epoch_state, total_active_balance, num_validators) =
         zkasper_witness_gen::witness_bootstrap::build(&mock, slot_1, TEST_DEPTH)
             .await
             .unwrap();
@@ -317,12 +317,13 @@ async fn test_full_pipeline_bootstrap_then_epoch_diff() {
         db.load().unwrap().expect("should load");
     assert_eq!(loaded_tree.root(), tree.root());
 
-    // Epoch diff
-    let (epoch_diff_witness, new_balance, _new_count) =
+    // Epoch diff (no cached EpochState from DB — uses slow path)
+    let old_state = zkasper_witness_gen::EpochState::empty(slot_1, num_validators);
+    let (epoch_diff_witness, _new_epoch_state, new_balance, _new_count) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &mock,
             &mut loaded_tree,
-            slot_1,
+            &old_state,
             slot_2,
             loaded_balance,
             TEST_DEPTH,
@@ -332,7 +333,7 @@ async fn test_full_pipeline_bootstrap_then_epoch_diff() {
 
     // Verify epoch diff
     let (_diff_commitment, diff_poseidon_root, diff_balance) =
-        zkasper_epoch_diff_guest::verify_epoch_diff(&epoch_diff_witness);
+        zkasper_epoch_diff_guest::verify_epoch_diff_with_depth(&epoch_diff_witness, TEST_DEPTH);
 
     assert_eq!(diff_poseidon_root, loaded_tree.root());
     assert_eq!(diff_balance, new_balance);

@@ -2,6 +2,16 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+/// Merkle multi-proof: verify multiple leaves against a single root
+/// using a minimal set of auxiliary sibling nodes.
+///
+/// The auxiliary nodes are ordered bottom-up, left-to-right — the same
+/// order the verifier consumes them when walking from leaves to root.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MerkleMultiProof {
+    pub auxiliaries: Vec<[u8; 32]>,
+}
+
 /// 48-byte BLS public key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlsPubkey(#[serde(with = "BigArray")] pub [u8; 48]);
@@ -62,9 +72,6 @@ pub struct ValidatorMutation {
     /// Raw pubkey split into 2x32-byte SSZ chunks (to verify field_leaves[0]).
     pub old_pubkey_chunks: [[u8; 32]; 2],
     pub new_pubkey_chunks: [[u8; 32]; 2],
-    /// SHA-256 Merkle siblings in the validators data tree (depth 40).
-    pub old_ssz_siblings: Vec<[u8; 32]>,
-    pub new_ssz_siblings: Vec<[u8; 32]>,
     /// Poseidon Merkle siblings (depth 40).
     pub poseidon_siblings: Vec<[u8; 32]>,
 }
@@ -90,6 +97,12 @@ pub struct EpochDiffWitness {
 
     // -- mutations --
     pub mutations: Vec<ValidatorMutation>,
+
+    // -- SSZ multi-proofs for validator trees --
+    /// Multi-proof for old validator tree (state 1).
+    pub ssz_multi_proof_1: MerkleMultiProof,
+    /// Multi-proof for new validator tree (state 2).
+    pub ssz_multi_proof_2: MerkleMultiProof,
 }
 
 /// Per-validator data carried inside an attestation witness.
