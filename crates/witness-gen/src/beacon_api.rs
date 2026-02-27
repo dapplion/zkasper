@@ -15,6 +15,10 @@ pub trait BeaconApi {
     async fn get_block_attestations(&self, block_id: &str) -> Result<Vec<AttestationResponse>>;
     async fn get_committees(&self, state_id: &str, epoch: u64) -> Result<Vec<CommitteeResponse>>;
     async fn get_header(&self, block_id: &str) -> Result<HeaderResponse>;
+
+    /// Fetch the raw SSZ-encoded BeaconState from the debug API endpoint.
+    /// Returns `None` if the endpoint is not available (e.g., mock API).
+    async fn get_state_ssz(&self, state_id: &str) -> Result<Option<Vec<u8>>>;
 }
 
 pub struct BeaconApiClient {
@@ -95,6 +99,24 @@ impl BeaconApi for BeaconApiClient {
             parent_root: parse_hex_bytes32(header, "parent_root")?,
         })
     }
+
+    async fn get_state_ssz(&self, state_id: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}/eth/v2/debug/beacon/states/{}", self.base_url, state_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/octet-stream")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            // Debug endpoint may not be available on all nodes
+            return Ok(None);
+        }
+
+        let bytes = resp.bytes().await?;
+        Ok(Some(bytes.to_vec()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +124,7 @@ impl BeaconApi for BeaconApiClient {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidatorResponse {
     pub index: u64,
     pub pubkey: [u8; 48],
@@ -136,6 +159,7 @@ pub struct CommitteeResponse {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HeaderResponse {
     pub slot: u64,
     pub state_root: [u8; 32],

@@ -37,6 +37,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  test-mainnet:
+    name: Test (mainnet SSZ)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache SSZ test data
+        uses: actions/cache@v4
+        with:
+          path: test_data/
+          key: ssz-test-data-v1
+      - name: Run mainnet SSZ tests
+        run: cargo test --release --test ssz_file_tests -- --ignored --nocapture
+        timeout-minutes: 15
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

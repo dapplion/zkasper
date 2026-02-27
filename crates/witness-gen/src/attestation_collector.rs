@@ -45,8 +45,7 @@ pub async fn collect_for_checkpoint(
         match api.get_block_attestations(&block_id).await {
             Ok(attestations) => {
                 for att in attestations {
-                    if att.data_target_epoch == target_epoch
-                        && att.data_target_root == *target_root
+                    if att.data_target_epoch == target_epoch && att.data_target_root == *target_root
                     {
                         matching_attestations.push(att);
                     }
@@ -67,11 +66,13 @@ pub async fn collect_for_checkpoint(
         let attesting_indices =
             resolve_attesting_validators(att, &committee_map).context("resolve attestors")?;
 
-        let entry = groups.entry(data_root).or_insert_with(|| GroupedAttestation {
-            data_root,
-            signature: att.signature,
-            validator_indices: BTreeSet::new(),
-        });
+        let entry = groups
+            .entry(data_root)
+            .or_insert_with(|| GroupedAttestation {
+                data_root,
+                signature: att.signature,
+                validator_indices: BTreeSet::new(),
+            });
 
         for idx in attesting_indices {
             entry.validator_indices.insert(idx);
@@ -120,9 +121,7 @@ struct GroupedAttestation {
 /// Build a committee lookup map from committee responses.
 ///
 /// Key: (slot, committee_index) → Value: list of validator indices
-fn build_committee_map(
-    committees: &[CommitteeResponse],
-) -> HashMap<(u64, u64), Vec<u64>> {
+fn build_committee_map(committees: &[CommitteeResponse]) -> HashMap<(u64, u64), Vec<u64>> {
     let mut map = HashMap::new();
     for c in committees {
         map.insert((c.slot, c.index), c.validators.clone());

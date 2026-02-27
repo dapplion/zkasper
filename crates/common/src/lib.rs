@@ -18,7 +18,7 @@ pub mod constants {
     /// Number of fields in a Validator container
     pub const VALIDATOR_FIELDS_COUNT: usize = 8;
 
-    /// Generalized index of `validators` in BeaconState (field index 11, depth 5)
+    /// Generalized index of `validators` in BeaconState (field index 11, depth 6 for Fulu)
     pub const BEACON_STATE_VALIDATORS_FIELD_INDEX: u64 = 11;
 
     /// Slots per epoch

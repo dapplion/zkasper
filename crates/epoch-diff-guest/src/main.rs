@@ -107,6 +107,7 @@ mod tests {
 
         let mutation = ValidatorMutation {
             validator_index: 1,
+            is_new: false,
             old_data: v1_old.clone(),
             new_data: v1_new.clone(),
             old_field_leaves: make_field_leaves(&v1_old),
@@ -125,6 +126,7 @@ mod tests {
             state_root_2,
             poseidon_root_1: old_poseidon_root,
             total_active_balance_1: total_old,
+            epoch_1: epoch_old,
             epoch_2: epoch_new,
             state_to_validators_siblings_1: state_siblings_1,
             state_to_validators_siblings_2: state_siblings_2,

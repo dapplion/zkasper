@@ -13,6 +13,7 @@ use crate::poseidon_tree::PoseidonTree;
 struct DbState {
     tree_levels: Vec<Vec<[u8; 32]>>,
     tree_depth: u32,
+    dense_depth: u32,
     cursor_epoch: u64,
     total_active_balance: u64,
     num_validators: u64,
@@ -40,6 +41,7 @@ impl Db {
         let state = DbState {
             tree_levels: tree.levels.clone(),
             tree_depth: tree.depth,
+            dense_depth: tree.dense_depth,
             cursor_epoch,
             total_active_balance,
             num_validators,
@@ -59,7 +61,7 @@ impl Db {
         }
         let bytes = std::fs::read(&self.path).context("read db file")?;
         let state: DbState = bincode::deserialize(&bytes).context("deserialize db state")?;
-        let tree = PoseidonTree::from_raw(state.tree_levels, state.tree_depth);
+        let tree = PoseidonTree::from_raw(state.tree_levels, state.tree_depth, state.dense_depth);
         Ok(Some((
             tree,
             state.cursor_epoch,

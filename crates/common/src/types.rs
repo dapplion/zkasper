@@ -51,6 +51,9 @@ pub struct Checkpoint {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorMutation {
     pub validator_index: u64,
+    /// True if this validator is new (not present in the old state).
+    /// When true, the old leaf in both SSZ and Poseidon trees is all-zeros.
+    pub is_new: bool,
     pub old_data: ValidatorData,
     pub new_data: ValidatorData,
     /// 8 field-level SSZ hash-tree leaves for the Validator container.
@@ -74,7 +77,9 @@ pub struct EpochDiffWitness {
     pub state_root_2: [u8; 32],
     pub poseidon_root_1: [u8; 32],
     pub total_active_balance_1: u64,
-    /// Epoch of state_root_2 (used for is_active checks).
+    /// Epoch of state_root_1 (used for old is_active checks).
+    pub epoch_1: u64,
+    /// Epoch of state_root_2 (used for new is_active checks).
     pub epoch_2: u64,
 
     // -- SSZ proof: state_root -> validators data tree root --

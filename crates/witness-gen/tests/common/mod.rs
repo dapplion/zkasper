@@ -54,9 +54,7 @@ impl BeaconApi for MockBeaconApi {
         self.committees
             .get(&(state_id.to_string(), epoch))
             .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("no committees for state_id={state_id}, epoch={epoch}")
-            })
+            .ok_or_else(|| anyhow::anyhow!("no committees for state_id={state_id}, epoch={epoch}"))
     }
 
     async fn get_header(&self, block_id: &str) -> Result<HeaderResponse> {
@@ -64,6 +62,11 @@ impl BeaconApi for MockBeaconApi {
             .get(block_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no header for block_id={block_id}"))
+    }
+
+    async fn get_state_ssz(&self, _state_id: &str) -> Result<Option<Vec<u8>>> {
+        // Mock API doesn't have raw SSZ state — triggers synthetic state proof fallback
+        Ok(None)
     }
 }
 

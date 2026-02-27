@@ -2,6 +2,7 @@ mod attestation_collector;
 mod beacon_api;
 mod db;
 mod poseidon_tree;
+mod ssz_state;
 mod state_diff;
 mod witness_bootstrap;
 mod witness_epoch_diff;
@@ -87,33 +88,50 @@ async fn main() -> Result<()> {
             let output_path = format!("{}/bootstrap_input.bin", cli.output_dir);
             let bytes = bincode::serialize(&witness).context("serialize bootstrap witness")?;
             std::fs::write(&output_path, bytes).context("write bootstrap witness")?;
-            eprintln!("wrote {output_path} ({} bytes)", std::fs::metadata(&output_path)?.len());
+            eprintln!(
+                "wrote {output_path} ({} bytes)",
+                std::fs::metadata(&output_path)?.len()
+            );
         }
 
         Command::EpochDiff { slot1, slot2 } => {
             eprintln!("epoch diff: slot {slot1} -> {slot2}...");
 
-            let (mut tree, cursor_epoch, total_active_balance, _num_validators) = db
-                .load()?
-                .context("no saved state — run bootstrap first")?;
+            let (mut tree, cursor_epoch, total_active_balance, _num_validators) =
+                db.load()?.context("no saved state — run bootstrap first")?;
 
             eprintln!("loaded tree state: cursor_epoch={cursor_epoch}, total_active_balance={total_active_balance}");
 
             let (witness, new_total_active_balance, new_num_validators) =
-                witness_epoch_diff::build(&api, &mut tree, slot1, slot2, total_active_balance, VALIDATORS_TREE_DEPTH)
-                    .await?;
+                witness_epoch_diff::build(
+                    &api,
+                    &mut tree,
+                    slot1,
+                    slot2,
+                    total_active_balance,
+                    VALIDATORS_TREE_DEPTH,
+                )
+                .await?;
 
             let new_epoch = witness.epoch_2;
 
             // Save updated tree
-            db.save(&tree, new_epoch, new_total_active_balance, new_num_validators)?;
+            db.save(
+                &tree,
+                new_epoch,
+                new_total_active_balance,
+                new_num_validators,
+            )?;
             eprintln!("saved tree state: epoch={new_epoch}, validators={new_num_validators}, total_active_balance={new_total_active_balance}");
 
             // Serialize witness
             let output_path = format!("{}/epoch_diff_input.bin", cli.output_dir);
             let bytes = bincode::serialize(&witness).context("serialize epoch diff witness")?;
             std::fs::write(&output_path, bytes).context("write epoch diff witness")?;
-            eprintln!("wrote {output_path} ({} bytes)", std::fs::metadata(&output_path)?.len());
+            eprintln!(
+                "wrote {output_path} ({} bytes)",
+                std::fs::metadata(&output_path)?.len()
+            );
         }
 
         Command::Finality {
@@ -144,7 +162,10 @@ async fn main() -> Result<()> {
             let output_path = format!("{}/finality_input.bin", cli.output_dir);
             let bytes = bincode::serialize(&witness).context("serialize finality witness")?;
             std::fs::write(&output_path, bytes).context("write finality witness")?;
-            eprintln!("wrote {output_path} ({} bytes)", std::fs::metadata(&output_path)?.len());
+            eprintln!(
+                "wrote {output_path} ({} bytes)",
+                std::fs::metadata(&output_path)?.len()
+            );
         }
 
         Command::Run => {

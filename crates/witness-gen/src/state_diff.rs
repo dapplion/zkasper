@@ -65,11 +65,17 @@ pub fn validator_response_to_pubkey_chunks(v: &ValidatorResponse) -> [[u8; 32]; 
 
 /// Find indices of validators that changed between two registries.
 ///
-/// A validator is considered "changed" if any of its mutable fields differ.
+/// A validator is considered "changed" if:
+/// - Any SSZ field differs between old and new state, OR
+/// - The validator's `active_effective_balance` changes due to epoch transition
+///   (activation_epoch or exit_epoch falls in `(epoch_1, epoch_2]`).
+///
 /// New validators (present in `new` but not `old`) are also returned.
 pub fn find_mutations(
     old_validators: &[ValidatorResponse],
     new_validators: &[ValidatorResponse],
+    epoch_1: u64,
+    epoch_2: u64,
 ) -> Vec<u64> {
     let mut changed = Vec::new();
 
@@ -77,13 +83,22 @@ pub fn find_mutations(
     for i in 0..old_validators.len().min(new_validators.len()) {
         let old = &old_validators[i];
         let new = &new_validators[i];
-        if old.effective_balance != new.effective_balance
+
+        // SSZ field changes
+        let ssz_changed = old.effective_balance != new.effective_balance
             || old.activation_epoch != new.activation_epoch
             || old.exit_epoch != new.exit_epoch
             || old.slashed != new.slashed
             || old.activation_eligibility_epoch != new.activation_eligibility_epoch
-            || old.withdrawable_epoch != new.withdrawable_epoch
-        {
+            || old.withdrawable_epoch != new.withdrawable_epoch;
+
+        // Epoch-boundary: is_active status changes between epoch_1 and epoch_2.
+        // Use new_validators fields since they reflect the canonical state.
+        let was_active = new.activation_epoch <= epoch_1 && epoch_1 < new.exit_epoch;
+        let is_active = new.activation_epoch <= epoch_2 && epoch_2 < new.exit_epoch;
+        let activity_changed = was_active != is_active;
+
+        if ssz_changed || activity_changed {
             changed.push(i as u64);
         }
     }
@@ -100,8 +115,12 @@ pub fn find_mutations(
 // SSZ tree building
 // ---------------------------------------------------------------------------
 
-/// Build a full SHA-256 Merkle tree from validator roots and extract siblings
+/// Build a sparse SHA-256 Merkle tree from validator roots and extract siblings
 /// for the requested leaf indices.
+///
+/// Only allocates the dense portion (2^ceil(log2(n)) leaves), then chains
+/// zero hashes for the remaining depth. This allows depth=40 with millions
+/// of validators without allocating 2^40 entries.
 ///
 /// Returns `(data_tree_root, index → siblings)`.
 pub fn build_validators_ssz_tree(
@@ -109,23 +128,33 @@ pub fn build_validators_ssz_tree(
     depth: u32,
     extract_indices: &[u64],
 ) -> ([u8; 32], HashMap<u64, Vec<[u8; 32]>>) {
-    let capacity = 1usize << depth;
-
     // Precompute zero hashes
     let mut zero_hashes = vec![[0u8; 32]; (depth + 1) as usize];
     for d in 1..=depth as usize {
         zero_hashes[d] = sha256_pair(&zero_hashes[d - 1], &zero_hashes[d - 1]);
     }
 
-    // Build levels bottom-up
+    // Compute dense depth
+    let dense_depth = if validator_roots.is_empty() {
+        1u32
+    } else {
+        let n = validator_roots.len() as u64;
+        n.next_power_of_two().trailing_zeros()
+    }
+    .max(1)
+    .min(depth);
+
+    let dense_capacity = 1usize << dense_depth;
+
+    // Build dense levels bottom-up
     let mut levels: Vec<Vec<[u8; 32]>> = Vec::new();
-    let mut leaves = vec![[0u8; 32]; capacity];
+    let mut leaves = vec![[0u8; 32]; dense_capacity];
     for (i, root) in validator_roots.iter().enumerate() {
         leaves[i] = *root;
     }
     levels.push(leaves);
 
-    for d in 0..depth as usize {
+    for d in 0..dense_depth as usize {
         let prev = &levels[d];
         let parent_count = prev.len() / 2;
         let mut parents = Vec::with_capacity(parent_count);
@@ -135,18 +164,30 @@ pub fn build_validators_ssz_tree(
         levels.push(parents);
     }
 
-    let root = levels[depth as usize][0];
+    // Compute full root by chaining through zero hashes
+    let mut root = levels[dense_depth as usize][0];
+    for d in dense_depth..depth {
+        root = sha256_pair(&root, &zero_hashes[d as usize]);
+    }
 
     // Extract siblings for requested indices
     let mut result = HashMap::new();
     for &leaf_idx in extract_indices {
         let mut siblings = Vec::with_capacity(depth as usize);
         let mut idx = leaf_idx as usize;
-        for level in levels.iter().take(depth as usize) {
+
+        // Dense levels
+        for level in levels.iter().take(dense_depth as usize) {
             let sibling_idx = idx ^ 1;
             siblings.push(level[sibling_idx]);
             idx >>= 1;
         }
+
+        // Sparse levels
+        for d in dense_depth..depth {
+            siblings.push(zero_hashes[d as usize]);
+        }
+
         result.insert(leaf_idx, siblings);
     }
 
@@ -168,7 +209,7 @@ pub fn build_validator_roots(validators: &[ValidatorResponse]) -> Vec<[u8; 32]> 
 /// Build a synthetic state proof from a validators data tree root.
 ///
 /// Computes `validators_root = list_hash_tree_root(data_root, length)`,
-/// then walks up a depth-5 BeaconState container tree at field index 11,
+/// then walks up a depth-6 BeaconState container tree at field index 11,
 /// returning `(state_root, siblings)`.
 ///
 /// The siblings are deterministic placeholders. For production use with a
@@ -178,7 +219,7 @@ pub fn make_state_proof(data_tree_root: &[u8; 32], list_length: u64) -> ([u8; 32
     use zkasper_common::ssz::list_hash_tree_root;
 
     let validators_root = list_hash_tree_root(data_tree_root, list_length);
-    let depth = 5;
+    let depth = 6;
     let mut siblings = Vec::with_capacity(depth);
     let mut current = validators_root;
     let mut idx = BEACON_STATE_VALIDATORS_FIELD_INDEX;

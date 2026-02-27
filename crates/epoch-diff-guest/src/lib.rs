@@ -11,7 +11,7 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
 
     let mut poseidon_root = witness.poseidon_root_1;
     let mut total_active_balance = witness.total_active_balance_1;
-    let epoch_old = witness.epoch_2 - 1;
+    let epoch_old = witness.epoch_1;
     let epoch_new = witness.epoch_2;
 
     let mut ssz_data_root_1: Option<[u8; 32]> = None;
@@ -20,19 +20,51 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
     for mutation in &witness.mutations {
         let idx = mutation.validator_index;
 
-        // -- Verify old validator against SSZ tree 1 --
-        verify_field_leaves(
-            &mutation.old_data,
-            &mutation.old_field_leaves,
-            &mutation.old_pubkey_chunks,
-        );
-        let old_validator_root = validator_hash_tree_root(&mutation.old_field_leaves);
-        let old_data_root =
-            compute_ssz_merkle_root(&old_validator_root, idx, &mutation.old_ssz_siblings);
+        if mutation.is_new {
+            // New validator: old leaf is all-zeros in both SSZ and Poseidon trees
+            let zero_leaf = [0u8; 32];
+            let old_data_root =
+                compute_ssz_merkle_root(&zero_leaf, idx, &mutation.old_ssz_siblings);
 
-        match ssz_data_root_1 {
-            None => ssz_data_root_1 = Some(old_data_root),
-            Some(r) => assert_eq!(r, old_data_root, "SSZ data root 1 mismatch"),
+            match ssz_data_root_1 {
+                None => ssz_data_root_1 = Some(old_data_root),
+                Some(r) => assert_eq!(r, old_data_root, "SSZ data root 1 mismatch (new validator)"),
+            }
+
+            // Verify Poseidon: old leaf is zero
+            let computed_old_root =
+                compute_poseidon_merkle_root(&zero_leaf, idx, &mutation.poseidon_siblings);
+            assert_eq!(
+                computed_old_root, poseidon_root,
+                "Poseidon root mismatch before new validator {}",
+                idx
+            );
+        } else {
+            // -- Verify old validator against SSZ tree 1 --
+            verify_field_leaves(
+                &mutation.old_data,
+                &mutation.old_field_leaves,
+                &mutation.old_pubkey_chunks,
+            );
+            let old_validator_root = validator_hash_tree_root(&mutation.old_field_leaves);
+            let old_data_root =
+                compute_ssz_merkle_root(&old_validator_root, idx, &mutation.old_ssz_siblings);
+
+            match ssz_data_root_1 {
+                None => ssz_data_root_1 = Some(old_data_root),
+                Some(r) => assert_eq!(r, old_data_root, "SSZ data root 1 mismatch"),
+            }
+
+            // -- Verify and update Poseidon accumulator (old) --
+            let old_active_balance = mutation.old_data.active_effective_balance(epoch_old);
+            let old_poseidon = poseidon_leaf(&mutation.old_data.pubkey.0, old_active_balance);
+            let computed_old_root =
+                compute_poseidon_merkle_root(&old_poseidon, idx, &mutation.poseidon_siblings);
+            assert_eq!(
+                computed_old_root, poseidon_root,
+                "Poseidon root mismatch before mutation {}",
+                idx
+            );
         }
 
         // -- Verify new validator against SSZ tree 2 --
@@ -50,23 +82,18 @@ pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64
             Some(r) => assert_eq!(r, new_data_root, "SSZ data root 2 mismatch"),
         }
 
-        // -- Verify and update Poseidon accumulator --
-        let old_active_balance = mutation.old_data.active_effective_balance(epoch_old);
-        let old_poseidon = poseidon_leaf(&mutation.old_data.pubkey.0, old_active_balance);
-        let computed_old_root =
-            compute_poseidon_merkle_root(&old_poseidon, idx, &mutation.poseidon_siblings);
-        assert_eq!(
-            computed_old_root, poseidon_root,
-            "Poseidon root mismatch before mutation {}",
-            idx
-        );
-
+        // -- Update Poseidon accumulator (new) --
         let new_active_balance = mutation.new_data.active_effective_balance(epoch_new);
         let new_poseidon = poseidon_leaf(&mutation.new_data.pubkey.0, new_active_balance);
         poseidon_root =
             compute_poseidon_merkle_root(&new_poseidon, idx, &mutation.poseidon_siblings);
 
         // -- Balance delta --
+        let old_active_balance = if mutation.is_new {
+            0
+        } else {
+            mutation.old_data.active_effective_balance(epoch_old)
+        };
         total_active_balance = total_active_balance - old_active_balance + new_active_balance;
     }
 

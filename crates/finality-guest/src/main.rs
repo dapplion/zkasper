@@ -24,7 +24,9 @@ fn main() {
 /// Core finality verification logic. Returns (accumulator_commitment, finalized_block_root).
 pub fn verify_finality(witness: &FinalityWitness) -> ([u8; 32], [u8; 32]) {
     use zkasper_common::bls::{compute_signing_root, verify_aggregate_signature};
-    use zkasper_common::poseidon::{accumulator_commitment, poseidon_leaf, verify_poseidon_merkle_proof};
+    use zkasper_common::poseidon::{
+        accumulator_commitment, poseidon_leaf, verify_poseidon_merkle_proof,
+    };
 
     // Verify the accumulator commitment binds poseidon_root + total_active_balance
     let expected_commitment =

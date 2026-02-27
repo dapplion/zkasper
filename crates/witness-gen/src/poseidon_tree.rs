@@ -1,37 +1,72 @@
 //! Host-side Poseidon Merkle tree.
 //!
-//! Maintains the full tree in memory, supports incremental leaf updates,
-//! and can extract Merkle proofs (sibling paths) for any leaf.
+//! Maintains a sparse tree in memory: only levels 0..dense_depth are stored,
+//! with zero_hash chaining for the remaining levels up to the full depth.
+//! Supports incremental leaf updates and Merkle proof extraction.
 
 use zkasper_common::poseidon::{poseidon_leaf, poseidon_pair};
 use zkasper_common::types::ValidatorData;
 
-/// Full Poseidon Merkle tree stored level-by-level.
+/// Sparse Poseidon Merkle tree stored level-by-level.
+///
+/// Only the dense portion (levels 0..dense_depth) is allocated.
+/// The full tree root at `depth` is computed by chaining the dense root
+/// through precomputed zero hashes for levels dense_depth..depth.
 pub struct PoseidonTree {
-    /// Tree depth (40 for VALIDATOR_REGISTRY_LIMIT = 2^40).
+    /// Full tree depth (e.g. 40 for VALIDATOR_REGISTRY_LIMIT = 2^40).
     pub(crate) depth: u32,
-    /// Nodes stored level-by-level. Level 0 = leaves, level `depth` = root.
-    /// Each level has `2^(depth - level)` nodes.
+    /// Dense depth: only levels 0..dense_depth are stored.
+    /// `dense_depth = ceil(log2(num_leaves))`, where num_leaves is rounded
+    /// up to the next power of 2.
+    pub(crate) dense_depth: u32,
+    /// Nodes stored level-by-level. Level 0 = leaves, level `dense_depth` = dense root.
+    /// Level d has `2^(dense_depth - d)` nodes.
     pub(crate) levels: Vec<Vec<[u8; 32]>>,
+    /// Precomputed Poseidon zero hashes for each level 0..=depth.
+    /// zero_hashes[0] = [0;32], zero_hashes[d] = poseidon_pair(zh[d-1], zh[d-1])
+    pub(crate) zero_hashes: Vec<[u8; 32]>,
+}
+
+/// Compute the smallest d such that 2^d >= n. Returns 0 for n <= 1.
+fn ceil_log2(n: usize) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    (n as u64).next_power_of_two().trailing_zeros()
+}
+
+/// Precompute Poseidon zero hashes for levels 0..=depth.
+fn compute_poseidon_zero_hashes(depth: u32) -> Vec<[u8; 32]> {
+    let mut zh = vec![[0u8; 32]; (depth + 1) as usize];
+    for d in 1..=depth as usize {
+        zh[d] = poseidon_pair(&zh[d - 1], &zh[d - 1]);
+    }
+    zh
 }
 
 impl PoseidonTree {
     /// Build the tree from a list of validators at a given epoch.
+    ///
+    /// Only allocates the dense portion (2^ceil(log2(n)) leaves).
+    /// The full root at `depth` is computed via zero_hash chaining.
     pub fn build(validators: &[ValidatorData], epoch: u64, depth: u32) -> Self {
-        let capacity = 1usize << depth;
+        let zero_hashes = compute_poseidon_zero_hashes(depth);
 
-        // Compute leaves
-        let mut leaves = vec![[0u8; 32]; capacity];
+        let dense_depth = ceil_log2(validators.len()).max(1).min(depth);
+        let dense_capacity = 1usize << dense_depth;
+
+        // Compute leaves (only the dense portion)
+        let mut leaves = vec![[0u8; 32]; dense_capacity];
         for (i, v) in validators.iter().enumerate() {
             let active_balance = v.active_effective_balance(epoch);
             leaves[i] = poseidon_leaf(&v.pubkey.0, active_balance);
         }
 
-        // Build levels bottom-up
-        let mut levels = Vec::with_capacity((depth + 1) as usize);
+        // Build levels bottom-up (0..dense_depth)
+        let mut levels = Vec::with_capacity((dense_depth + 1) as usize);
         levels.push(leaves);
 
-        for d in 0..depth as usize {
+        for d in 0..dense_depth as usize {
             let prev = &levels[d];
             let parent_count = prev.len() / 2;
             let mut parents = Vec::with_capacity(parent_count);
@@ -41,42 +76,72 @@ impl PoseidonTree {
             levels.push(parents);
         }
 
-        Self { depth, levels }
+        Self {
+            depth,
+            dense_depth,
+            levels,
+            zero_hashes,
+        }
     }
 
     /// Reconstruct from raw level data (for loading from DB).
-    pub fn from_raw(levels: Vec<Vec<[u8; 32]>>, depth: u32) -> Self {
-        Self { depth, levels }
+    pub fn from_raw(levels: Vec<Vec<[u8; 32]>>, depth: u32, dense_depth: u32) -> Self {
+        let zero_hashes = compute_poseidon_zero_hashes(depth);
+        Self {
+            depth,
+            dense_depth,
+            levels,
+            zero_hashes,
+        }
     }
 
-    /// Current root hash.
+    /// Current root hash at the full tree depth.
+    ///
+    /// Chains the dense root through zero hashes for levels dense_depth..depth.
     pub fn root(&self) -> [u8; 32] {
-        self.levels[self.depth as usize][0]
+        let mut current = self.levels[self.dense_depth as usize][0];
+        for d in self.dense_depth..self.depth {
+            current = poseidon_pair(&current, &self.zero_hashes[d as usize]);
+        }
+        current
     }
 
     /// Get Merkle proof siblings for a leaf at `index`.
+    ///
+    /// For levels 0..dense_depth, siblings come from stored data.
+    /// For levels dense_depth..depth, siblings are zero_hashes.
     pub fn get_siblings(&self, index: u64) -> Vec<[u8; 32]> {
         let mut siblings = Vec::with_capacity(self.depth as usize);
         let mut idx = index as usize;
-        for d in 0..self.depth as usize {
+
+        // Dense levels: from stored data
+        for d in 0..self.dense_depth as usize {
             let sibling_idx = idx ^ 1;
             siblings.push(self.levels[d][sibling_idx]);
             idx >>= 1;
         }
+
+        // Sparse levels: zero hashes
+        for d in self.dense_depth..self.depth {
+            siblings.push(self.zero_hashes[d as usize]);
+        }
+
         siblings
     }
 
-    /// Update a leaf and recompute the path to root.
+    /// Update a leaf and recompute the path to the dense root.
     /// Returns the siblings BEFORE the update (for the witness).
+    ///
+    /// The full root (via `root()`) is automatically correct after this call.
     pub fn update_leaf(&mut self, index: u64, new_leaf: [u8; 32]) -> Vec<[u8; 32]> {
         let siblings = self.get_siblings(index);
 
         // Update leaf
         self.levels[0][index as usize] = new_leaf;
 
-        // Recompute path
+        // Recompute path within dense portion
         let mut idx = index as usize;
-        for d in 0..self.depth as usize {
+        for d in 0..self.dense_depth as usize {
             let parent_idx = idx / 2;
             let left = self.levels[d][parent_idx * 2];
             let right = self.levels[d][parent_idx * 2 + 1];
@@ -108,6 +173,8 @@ mod tests {
         let tree = PoseidonTree::build(&validators, 100, 2); // depth 2 for 4 leaves
         let root = tree.root();
         assert_ne!(root, [0u8; 32]);
+        assert_eq!(tree.dense_depth, 2);
+        assert_eq!(tree.depth, 2);
     }
 
     #[test]
@@ -140,5 +207,77 @@ mod tests {
                 &tree.root()
             ));
         }
+    }
+
+    #[test]
+    fn test_sparse_tree_depth_40() {
+        // Build a sparse tree with depth 40 but only 100 validators.
+        // This should NOT OOM (allocates ~256 leaves, not 2^40).
+        let validators: Vec<_> = (0..100).map(dummy_validator).collect();
+        let tree = PoseidonTree::build(&validators, 100, 40);
+
+        assert_eq!(tree.depth, 40);
+        assert_eq!(tree.dense_depth, 7); // ceil(log2(100)) = 7 (2^7=128)
+        assert_ne!(tree.root(), [0u8; 32]);
+
+        // Verify siblings work at full depth
+        let leaf = tree.levels[0][0];
+        let siblings = tree.get_siblings(0);
+        assert_eq!(siblings.len(), 40);
+
+        // Verify merkle proof
+        use zkasper_common::poseidon::verify_poseidon_merkle_proof;
+        assert!(verify_poseidon_merkle_proof(
+            &leaf,
+            0,
+            &siblings,
+            &tree.root()
+        ));
+    }
+
+    #[test]
+    fn test_sparse_tree_matches_dense() {
+        // Verify that a sparse tree (depth=10) with 4 validators produces
+        // the same root as a tree built with depth=2 when we account for
+        // the zero-hash chaining.
+        let validators: Vec<_> = (0..4).map(dummy_validator).collect();
+        let dense_tree = PoseidonTree::build(&validators, 100, 2);
+        let sparse_tree = PoseidonTree::build(&validators, 100, 10);
+
+        // The sparse root chains through zero_hashes[2..10]
+        // The dense root is at depth 2
+        // They should match because the sparse tree chains:
+        //   root = dense_root -> zh[2] -> zh[3] -> ... -> zh[9]
+        let mut expected_root = dense_tree.root();
+        let zh = compute_poseidon_zero_hashes(10);
+        for d in 2..10 {
+            expected_root = poseidon_pair(&expected_root, &zh[d]);
+        }
+        assert_eq!(sparse_tree.root(), expected_root);
+    }
+
+    #[test]
+    fn test_sparse_update_and_verify() {
+        let validators: Vec<_> = (0..8).map(dummy_validator).collect();
+        let mut tree = PoseidonTree::build(&validators, 100, 20);
+        let old_root = tree.root();
+
+        // Update leaf 3
+        let new_leaf = poseidon_leaf(&[99u8; 48], 16_000_000_000);
+        let old_siblings = tree.update_leaf(3, new_leaf);
+        let new_root = tree.root();
+
+        assert_ne!(old_root, new_root);
+        assert_eq!(old_siblings.len(), 20);
+
+        // Verify new leaf with new root
+        use zkasper_common::poseidon::verify_poseidon_merkle_proof;
+        let new_siblings = tree.get_siblings(3);
+        assert!(verify_poseidon_merkle_proof(
+            &new_leaf,
+            3,
+            &new_siblings,
+            &new_root
+        ));
     }
 }

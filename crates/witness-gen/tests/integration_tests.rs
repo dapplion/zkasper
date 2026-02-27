@@ -27,7 +27,7 @@ fn test_find_mutations_balance_change() {
     let old = vec![v0.clone(), v1_old, v2.clone()];
     let new = vec![v0, v1_new, v2];
 
-    let changed = find_mutations(&old, &new);
+    let changed = find_mutations(&old, &new, 100, 100);
     assert_eq!(changed, vec![1]);
 }
 
@@ -40,7 +40,7 @@ fn test_find_mutations_new_validators() {
     let old = vec![v0.clone(), v1.clone()];
     let new = vec![v0, v1, v2];
 
-    let changed = find_mutations(&old, &new);
+    let changed = find_mutations(&old, &new, 100, 100);
     assert_eq!(changed, vec![2]);
 }
 
@@ -52,7 +52,7 @@ fn test_find_mutations_no_changes() {
     let old = vec![v0.clone(), v1.clone()];
     let new = vec![v0, v1];
 
-    let changed = find_mutations(&old, &new);
+    let changed = find_mutations(&old, &new, 100, 100);
     assert!(changed.is_empty());
 }
 
@@ -65,7 +65,45 @@ fn test_find_mutations_activation_change() {
     let old = vec![v0];
     let new = vec![v0_new];
 
-    let changed = find_mutations(&old, &new);
+    let changed = find_mutations(&old, &new, 100, 100);
+    assert_eq!(changed, vec![0]);
+}
+
+#[test]
+fn test_find_mutations_epoch_boundary_activation() {
+    // Validator activates at epoch 101 — no SSZ field changes between states
+    let mut v = make_response(0, 32);
+    v.activation_epoch = 101;
+    v.exit_epoch = u64::MAX;
+
+    let old = vec![v.clone()];
+    let new = vec![v];
+
+    // Same epoch: not detected
+    let changed = find_mutations(&old, &new, 100, 100);
+    assert!(changed.is_empty());
+
+    // Spans activation: detected
+    let changed = find_mutations(&old, &new, 100, 101);
+    assert_eq!(changed, vec![0]);
+}
+
+#[test]
+fn test_find_mutations_epoch_boundary_exit() {
+    // Validator exits at epoch 101 — no SSZ field changes between states
+    let mut v = make_response(0, 32);
+    v.activation_epoch = 0;
+    v.exit_epoch = 101;
+
+    let old = vec![v.clone()];
+    let new = vec![v];
+
+    // Same epoch: not detected
+    let changed = find_mutations(&old, &new, 100, 100);
+    assert!(changed.is_empty());
+
+    // Spans exit: detected
+    let changed = find_mutations(&old, &new, 100, 101);
     assert_eq!(changed, vec![0]);
 }
 
@@ -264,10 +302,7 @@ async fn test_full_pipeline_bootstrap_then_epoch_diff() {
 
     // Verify bootstrap
     let (_bootstrap_commitment, bootstrap_poseidon_root, bootstrap_balance) =
-        zkasper_bootstrap_guest::verify_bootstrap_with_depth(
-            &bootstrap_witness,
-            TEST_DEPTH,
-        );
+        zkasper_bootstrap_guest::verify_bootstrap_with_depth(&bootstrap_witness, TEST_DEPTH);
     assert_eq!(bootstrap_poseidon_root, tree.root());
     assert_eq!(bootstrap_balance, total_active_balance);
 
