@@ -1,6 +1,7 @@
 mod attestation_collector;
 mod beacon_api;
 mod db;
+mod epoch_state;
 mod poseidon_tree;
 mod ssz_state;
 mod state_diff;
@@ -15,6 +16,7 @@ use zkasper_common::constants::VALIDATORS_TREE_DEPTH;
 
 use beacon_api::BeaconApiClient;
 use db::Db;
+use epoch_state::EpochState;
 
 #[derive(Parser)]
 #[command(name = "zkasper-witness-gen")]
@@ -75,7 +77,7 @@ async fn main() -> Result<()> {
         Command::Bootstrap { slot } => {
             eprintln!("bootstrapping from slot {slot}...");
 
-            let (witness, tree, total_active_balance, num_validators) =
+            let (witness, tree, _epoch_state, total_active_balance, num_validators) =
                 witness_bootstrap::build(&api, slot, VALIDATORS_TREE_DEPTH).await?;
 
             let epoch = witness.epoch;
@@ -102,11 +104,15 @@ async fn main() -> Result<()> {
 
             eprintln!("loaded tree state: cursor_epoch={cursor_epoch}, total_active_balance={total_active_balance}");
 
-            let (witness, new_total_active_balance, new_num_validators) =
+            // TODO: persist EpochState to DB for incremental epoch diffs.
+            // For now, use empty EpochState (forces slow recomputation path).
+            let old_state = EpochState::empty(slot1, _num_validators);
+
+            let (witness, _new_epoch_state, new_total_active_balance, new_num_validators) =
                 witness_epoch_diff::build(
                     &api,
                     &mut tree,
-                    slot1,
+                    &old_state,
                     slot2,
                     total_active_balance,
                     VALIDATORS_TREE_DEPTH,
