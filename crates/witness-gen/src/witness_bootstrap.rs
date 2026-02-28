@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use tracing::{info, info_span};
 
-use zkasper_common::constants::SLOTS_PER_EPOCH;
+use zkasper_common::ChainConfig;
 use zkasper_common::types::BootstrapWitness;
 
 use crate::beacon_api::BeaconApi;
@@ -18,14 +18,17 @@ use crate::epoch_state::EpochState;
 
 /// Build a BootstrapWitness and PoseidonTree from a beacon state at `slot`.
 ///
-/// `depth` controls the Merkle tree depth (40 for mainnet, smaller for tests).
+/// `ssz_depth`: depth of the SSZ validators data tree (40 per spec).
+/// `poseidon_depth`: depth of the Poseidon accumulator tree (22 for mainnet).
 /// Returns `(witness, tree, epoch_state, total_active_balance, num_validators)`.
 pub async fn build(
     api: &impl BeaconApi,
+    config: &ChainConfig,
     slot: u64,
-    depth: u32,
 ) -> Result<(BootstrapWitness, PoseidonTree, EpochState, u64, u64)> {
-    let _span = info_span!("bootstrap", slot, depth).entered();
+    let ssz_depth = config.validators_tree_depth;
+    let poseidon_depth = config.poseidon_tree_depth;
+    let _span = info_span!("bootstrap", slot, ssz_depth, poseidon_depth).entered();
     let slot_str = slot.to_string();
 
     // Fetch header to get the state_root
@@ -34,7 +37,7 @@ pub async fn build(
         .await
         .context("fetch block header")?;
     let state_root = header.state_root;
-    let epoch = header.slot / SLOTS_PER_EPOCH;
+    let epoch = header.slot / config.slots_per_epoch;
 
     // Fetch all validators at this state
     let validators = {
@@ -71,7 +74,7 @@ pub async fn build(
 
     let (ssz_data_root, _) = {
         let _span = info_span!("ssz_tree").entered();
-        crate::state_diff::build_validators_ssz_tree(&validator_roots, depth, &[])
+        crate::state_diff::build_validators_ssz_tree(&validator_roots, ssz_depth, &[])
     };
 
     // Compute validators HTR (list_hash_tree_root = mix_in_length(data_root, len))
@@ -104,7 +107,7 @@ pub async fn build(
     // Build Poseidon tree
     let tree = {
         let _span = info_span!("poseidon_tree").entered();
-        PoseidonTree::build(&validator_data, epoch, depth)
+        PoseidonTree::build(&validator_data, epoch, poseidon_depth)
     };
 
     // Compute total active balance

@@ -5,27 +5,46 @@
 //   1. Verifies old/new validator data against the SSZ trees
 //   2. Verifies/updates the Poseidon accumulator leaf
 //   3. Tracks the total active balance delta
-//
-// On Zisk this file would use:
-//   #![no_main]
-//   ziskos::entrypoint!(main);
-//
-// For now we keep it as a normal binary for native testing.
+#![cfg_attr(target_os = "zkvm", no_main)]
 
 use zkasper_common::types::EpochDiffWitness;
 use zkasper_epoch_diff_guest::verify_epoch_diff;
 
+#[cfg(target_os = "zkvm")]
+ziskos::entrypoint!(main);
+
 fn main() {
-    // In Zisk: let input = ziskos::read_input_slice();
+    #[cfg(target_os = "zkvm")]
+    let input = ziskos::read_input_slice();
+    #[cfg(not(target_os = "zkvm"))]
     let input = std::fs::read("input.bin").expect("read input.bin");
+
     let witness: EpochDiffWitness = bincode::deserialize(&input).expect("deserialize witness");
 
-    let (commitment, poseidon_root, total_active_balance) = verify_epoch_diff(&witness);
+    let (commitment, _poseidon_root, _total_active_balance) = verify_epoch_diff(&witness);
 
-    // In Zisk: write via set_output
-    eprintln!("accumulator_commitment_2: {:x?}", commitment);
-    eprintln!("poseidon_root_2: {:x?}", poseidon_root);
-    eprintln!("total_active_balance_2: {}", total_active_balance);
+    // Public outputs: [commitment(8), state_root_1(8), state_root_2(8)]
+    #[cfg(target_os = "zkvm")]
+    {
+        write_bytes32_output(0, &commitment);
+        write_bytes32_output(8, &witness.state_root_1);
+        write_bytes32_output(16, &witness.state_root_2);
+    }
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        eprintln!("accumulator_commitment_2: {:x?}", commitment);
+        eprintln!("state_root_1: {:x?}", witness.state_root_1);
+        eprintln!("state_root_2: {:x?}", witness.state_root_2);
+    }
+}
+
+#[cfg(target_os = "zkvm")]
+fn write_bytes32_output(offset: usize, bytes: &[u8; 32]) {
+    for i in 0..8usize {
+        let b = i * 4;
+        let word = u32::from_le_bytes([bytes[b], bytes[b + 1], bytes[b + 2], bytes[b + 3]]);
+        ziskos::set_output(offset + i, word);
+    }
 }
 
 #[cfg(test)]
@@ -35,7 +54,7 @@ mod tests {
     use zkasper_common::ssz::{list_hash_tree_root, sha256_pair, validator_hash_tree_root};
     use zkasper_common::test_utils::*;
     use zkasper_common::types::*;
-    use zkasper_epoch_diff_guest::verify_epoch_diff;
+    use zkasper_epoch_diff_guest::verify_epoch_diff_with_depth;
 
     fn make_state_proof(data_tree_root: &[u8; 32], list_length: u64) -> ([u8; 32], Vec<[u8; 32]>) {
         let validators_root = list_hash_tree_root(data_tree_root, list_length);
@@ -64,7 +83,8 @@ mod tests {
     #[test]
     fn test_epoch_diff_single_mutation() {
         use zkasper_common::constants::VALIDATORS_TREE_DEPTH;
-        let depth = VALIDATORS_TREE_DEPTH;
+        let ssz_depth = VALIDATORS_TREE_DEPTH;
+        let poseidon_depth = 4u32; // small depth for 4 validators
         let epoch_old = 100u64;
         let epoch_new = 101u64;
 
@@ -82,27 +102,27 @@ mod tests {
             .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
             .collect();
         let (old_data_root, ssz_multi_proof_1) =
-            build_ssz_tree_multi_proof(&old_roots, depth, &[1]);
+            build_ssz_tree_multi_proof(&old_roots, ssz_depth, &[1]);
 
         let new_roots: Vec<_> = [&v0, &v1_new, &v2, &v3]
             .iter()
             .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
             .collect();
         let (new_data_root, ssz_multi_proof_2) =
-            build_ssz_tree_multi_proof(&new_roots, depth, &[1]);
+            build_ssz_tree_multi_proof(&new_roots, ssz_depth, &[1]);
 
         let old_poseidon_leaves: Vec<_> = [&v0, &v1_old, &v2, &v3]
             .iter()
             .map(|v| poseidon_leaf(&v.pubkey.0, v.active_effective_balance(epoch_old)))
             .collect();
         let (old_poseidon_root, poseidon_siblings) =
-            build_poseidon_tree(&old_poseidon_leaves, depth);
+            build_poseidon_tree(&old_poseidon_leaves, poseidon_depth);
 
         let new_poseidon_leaves: Vec<_> = [&v0, &v1_new, &v2, &v3]
             .iter()
             .map(|v| poseidon_leaf(&v.pubkey.0, v.active_effective_balance(epoch_new)))
             .collect();
-        let (expected_new_poseidon_root, _) = build_poseidon_tree(&new_poseidon_leaves, depth);
+        let (expected_new_poseidon_root, _) = build_poseidon_tree(&new_poseidon_leaves, poseidon_depth);
 
         let num_validators = 4u64;
         let (state_root_1, state_siblings_1) = make_state_proof(&old_data_root, num_validators);
@@ -138,7 +158,8 @@ mod tests {
             ssz_multi_proof_2,
         };
 
-        let (commitment, new_poseidon_root, new_total_balance) = verify_epoch_diff(&witness);
+        let (commitment, new_poseidon_root, new_total_balance) =
+            zkasper_epoch_diff_guest::verify_epoch_diff_with_depth(&witness, ssz_depth, poseidon_depth);
 
         assert_eq!(new_poseidon_root, expected_new_poseidon_root);
         let expected_total = 3 * 32_000_000_000 + 16_000_000_000;

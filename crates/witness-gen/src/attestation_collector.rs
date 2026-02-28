@@ -3,30 +3,34 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
+use tracing::info;
 
-use zkasper_common::constants::SLOTS_PER_EPOCH;
-use zkasper_common::ssz::{sha256_pair, u64_to_chunk};
+use zkasper_common::ChainConfig;
 use zkasper_common::types::{AttestationWitness, AttestingValidator, BlsPubkey, BlsSignature};
 
 use crate::beacon_api::{AttestationResponse, BeaconApi, CommitteeResponse, ValidatorResponse};
-use crate::poseidon_tree::PoseidonTree;
 use crate::state_diff::validator_response_to_data;
 
-/// Collect all attestations targeting a specific checkpoint and assemble
-/// AttestationWitness values with Poseidon proofs.
+/// Collect attestations targeting a specific checkpoint.
+///
+/// Stops early once the unique attesting balance reaches 2/3 of `total_active_balance`.
+/// Returns `(attestation_witnesses, unique_validator_indices)`.
 ///
 /// Scans blocks in `[target_epoch * SLOTS_PER_EPOCH .. (target_epoch + 2) * SLOTS_PER_EPOCH)`
 /// for attestations whose target matches `(target_epoch, target_root)`.
 pub async fn collect_for_checkpoint(
     api: &impl BeaconApi,
+    config: &ChainConfig,
     target_epoch: u64,
     target_root: &[u8; 32],
     validators: &[ValidatorResponse],
-    poseidon_tree: &PoseidonTree,
     epoch: u64,
-) -> Result<Vec<AttestationWitness>> {
+    total_active_balance: u64,
+) -> Result<(Vec<AttestationWitness>, Vec<u64>)> {
+    let spe = config.slots_per_epoch;
+
     // Fetch committees for the target epoch
-    let slot_str = (target_epoch * SLOTS_PER_EPOCH).to_string();
+    let slot_str = (target_epoch * spe).to_string();
     let committees = api
         .get_committees(&slot_str, target_epoch)
         .await
@@ -36,8 +40,8 @@ pub async fn collect_for_checkpoint(
     let committee_map = build_committee_map(&committees);
 
     // Scan blocks for matching attestations
-    let scan_start = target_epoch * SLOTS_PER_EPOCH;
-    let scan_end = (target_epoch + 2) * SLOTS_PER_EPOCH;
+    let scan_start = target_epoch * spe;
+    let scan_end = (target_epoch + 2) * spe;
     let mut matching_attestations: Vec<AttestationResponse> = Vec::new();
 
     for slot in scan_start..scan_end {
@@ -58,64 +62,206 @@ pub async fn collect_for_checkpoint(
         }
     }
 
-    // Group attestations by data root, dedup validators
-    let mut groups: HashMap<[u8; 32], GroupedAttestation> = HashMap::new();
+    // Build one AttestationWitness per on-chain attestation.
+    // Track unique validators for dedup and early stopping.
+    let two_thirds_balance = (total_active_balance as u128 * 2 / 3) as u64;
+    let mut seen_validators: BTreeSet<u64> = BTreeSet::new();
+    let mut unique_attesting_balance: u64 = 0;
+    let mut result = Vec::with_capacity(matching_attestations.len());
 
     for att in &matching_attestations {
-        let data_root = compute_attestation_data_root(att);
         let attesting_indices =
             resolve_attesting_validators(att, &committee_map).context("resolve attestors")?;
 
-        let entry = groups
-            .entry(data_root)
-            .or_insert_with(|| GroupedAttestation {
-                data_root,
-                signature: att.signature,
-                validator_indices: BTreeSet::new(),
-            });
+        // Use BTreeSet to get strictly ascending order (required by guest verifier)
+        let sorted_indices: BTreeSet<u64> = attesting_indices.into_iter().collect();
 
-        for idx in attesting_indices {
-            entry.validator_indices.insert(idx);
+        if sorted_indices.is_empty() {
+            continue;
         }
-    }
 
-    // Build AttestationWitness values
-    let mut result = Vec::with_capacity(groups.len());
+        let mut attesting_validators = Vec::with_capacity(sorted_indices.len());
 
-    for (_, group) in groups {
-        let mut attesting_validators = Vec::with_capacity(group.validator_indices.len());
-
-        // BTreeSet iterates in ascending order → strictly increasing indices
-        for &idx in &group.validator_indices {
+        for &idx in &sorted_indices {
             let v_resp = validators
                 .get(idx as usize)
                 .context("validator index out of range")?;
             let v_data = validator_response_to_data(v_resp);
             let active_balance = v_data.active_effective_balance(epoch);
-            let siblings = poseidon_tree.get_siblings(idx);
+            let count_balance = seen_validators.insert(idx);
+
+            if count_balance {
+                unique_attesting_balance += active_balance;
+            }
 
             attesting_validators.push(AttestingValidator {
                 validator_index: idx,
                 pubkey: BlsPubkey(v_resp.pubkey),
                 active_effective_balance: active_balance,
-                poseidon_siblings: siblings,
+                count_balance,
             });
         }
 
         result.push(AttestationWitness {
-            attestation_data_root: group.data_root,
-            signature: BlsSignature(group.signature),
+            data_slot: att.data_slot,
+            data_index: att.data_index,
+            data_beacon_block_root: att.data_beacon_block_root,
+            data_source_epoch: att.data_source_epoch,
+            data_source_root: att.data_source_root,
+            data_target_epoch: att.data_target_epoch,
+            data_target_root: att.data_target_root,
+            signature: BlsSignature(att.signature),
             attesting_validators,
         });
+
+        // Stop early once we have >= 2/3 of total active balance
+        if unique_attesting_balance >= two_thirds_balance {
+            info!(
+                attestations = result.len(),
+                unique_validators = seen_validators.len(),
+                unique_balance = unique_attesting_balance,
+                total_balance = total_active_balance,
+                "reached 2/3 supermajority, stopping",
+            );
+            break;
+        }
     }
 
-    Ok(result)
+    let unique_indices: Vec<u64> = seen_validators.into_iter().collect();
+    Ok((result, unique_indices))
 }
 
-struct GroupedAttestation {
-    data_root: [u8; 32],
-    signature: [u8; 96],
-    validator_indices: BTreeSet<u64>,
+/// Per-slot attestation data.
+pub struct SlotAttestations {
+    pub slot: u64,
+    pub attestations: Vec<AttestationWitness>,
+    /// Sorted indices of validators with count_balance=true in this slot.
+    pub counted_indices: Vec<u64>,
+    /// All unique validator indices in this slot's attestations.
+    pub all_validator_indices: Vec<u64>,
+}
+
+/// Collect attestations grouped by the block slot they were included in.
+///
+/// Unlike `collect_for_checkpoint`, does NOT early-stop at 2/3 (that's the
+/// justification proof's job). Maintains cross-slot dedup for `count_balance`.
+///
+/// Returns one `SlotAttestations` per block slot that contained matching attestations.
+pub async fn collect_per_slot_for_checkpoint(
+    api: &impl BeaconApi,
+    config: &ChainConfig,
+    target_epoch: u64,
+    target_root: &[u8; 32],
+    validators: &[ValidatorResponse],
+    epoch: u64,
+) -> Result<Vec<SlotAttestations>> {
+    let spe = config.slots_per_epoch;
+
+    // Fetch committees for the target epoch
+    let slot_str = (target_epoch * spe).to_string();
+    let committees = api
+        .get_committees(&slot_str, target_epoch)
+        .await
+        .context("fetch committees")?;
+
+    let committee_map = build_committee_map(&committees);
+
+    // Scan blocks, group matching attestations by block slot
+    let scan_start = target_epoch * spe;
+    let scan_end = (target_epoch + 2) * spe;
+
+    let mut per_slot: Vec<(u64, Vec<AttestationResponse>)> = Vec::new();
+
+    for slot in scan_start..scan_end {
+        let block_id = slot.to_string();
+        match api.get_block_attestations(&block_id).await {
+            Ok(attestations) => {
+                let matching: Vec<_> = attestations
+                    .into_iter()
+                    .filter(|att| {
+                        att.data_target_epoch == target_epoch
+                            && att.data_target_root == *target_root
+                    })
+                    .collect();
+                if !matching.is_empty() {
+                    per_slot.push((slot, matching));
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // Build per-slot witnesses with cross-slot dedup
+    let mut seen_validators: BTreeSet<u64> = BTreeSet::new();
+    let mut result = Vec::with_capacity(per_slot.len());
+
+    for (slot, slot_attestations) in &per_slot {
+        let mut attestation_witnesses = Vec::with_capacity(slot_attestations.len());
+        let mut slot_counted_indices: BTreeSet<u64> = BTreeSet::new();
+        let mut slot_all_indices: BTreeSet<u64> = BTreeSet::new();
+
+        for att in slot_attestations {
+            let attesting_indices =
+                resolve_attesting_validators(att, &committee_map).context("resolve attestors")?;
+
+            let sorted_indices: BTreeSet<u64> = attesting_indices.into_iter().collect();
+            if sorted_indices.is_empty() {
+                continue;
+            }
+
+            let mut attesting_validators = Vec::with_capacity(sorted_indices.len());
+
+            for &idx in &sorted_indices {
+                let v_resp = validators
+                    .get(idx as usize)
+                    .context("validator index out of range")?;
+                let v_data = validator_response_to_data(v_resp);
+                let active_balance = v_data.active_effective_balance(epoch);
+                let count_balance = seen_validators.insert(idx);
+
+                if count_balance {
+                    slot_counted_indices.insert(idx);
+                }
+                slot_all_indices.insert(idx);
+
+                attesting_validators.push(AttestingValidator {
+                    validator_index: idx,
+                    pubkey: BlsPubkey(v_resp.pubkey),
+                    active_effective_balance: active_balance,
+                    count_balance,
+                });
+            }
+
+            attestation_witnesses.push(AttestationWitness {
+                data_slot: att.data_slot,
+                data_index: att.data_index,
+                data_beacon_block_root: att.data_beacon_block_root,
+                data_source_epoch: att.data_source_epoch,
+                data_source_root: att.data_source_root,
+                data_target_epoch: att.data_target_epoch,
+                data_target_root: att.data_target_root,
+                signature: BlsSignature(att.signature),
+                attesting_validators,
+            });
+        }
+
+        if !attestation_witnesses.is_empty() {
+            result.push(SlotAttestations {
+                slot: *slot,
+                attestations: attestation_witnesses,
+                counted_indices: slot_counted_indices.into_iter().collect(),
+                all_validator_indices: slot_all_indices.into_iter().collect(),
+            });
+        }
+    }
+
+    info!(
+        slots = result.len(),
+        total_unique_validators = seen_validators.len(),
+        "collected per-slot attestations",
+    );
+
+    Ok(result)
 }
 
 /// Build a committee lookup map from committee responses.
@@ -190,35 +336,3 @@ fn get_bit(bitfield: &[u8], idx: usize) -> bool {
     (bitfield[byte_idx] >> bit_idx) & 1 == 1
 }
 
-/// Compute `hash_tree_root(AttestationData)` — manual SSZ merkleization of 5 fields.
-///
-/// AttestationData layout:
-/// ```text
-/// field[0] = le_pad32(slot)
-/// field[1] = le_pad32(index)
-/// field[2] = beacon_block_root
-/// field[3] = source: sha256(le_pad32(epoch) || root)
-/// field[4] = target: sha256(le_pad32(epoch) || root)
-/// ```
-///
-/// Merkle tree: 8 leaves (padded to next power of 2 with zeros).
-fn compute_attestation_data_root(att: &AttestationResponse) -> [u8; 32] {
-    let zero = [0u8; 32];
-
-    let field0 = u64_to_chunk(att.data_slot);
-    let field1 = u64_to_chunk(att.data_index);
-    let field2 = att.data_beacon_block_root;
-    let field3 = sha256_pair(&u64_to_chunk(att.data_source_epoch), &att.data_source_root);
-    let field4 = sha256_pair(&u64_to_chunk(att.data_target_epoch), &att.data_target_root);
-
-    // Depth-3 tree with 8 leaves (5 data + 3 zero)
-    let n0 = sha256_pair(&field0, &field1);
-    let n1 = sha256_pair(&field2, &field3);
-    let n2 = sha256_pair(&field4, &zero);
-    let n3 = sha256_pair(&zero, &zero);
-
-    let n4 = sha256_pair(&n0, &n1);
-    let n5 = sha256_pair(&n2, &n3);
-
-    sha256_pair(&n4, &n5)
-}

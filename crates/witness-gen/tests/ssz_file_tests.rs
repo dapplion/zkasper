@@ -12,12 +12,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use zkasper_common::constants::{SLOTS_PER_EPOCH, VALIDATORS_TREE_DEPTH};
+use zkasper_common::constants::{POSEIDON_TREE_DEPTH, VALIDATORS_TREE_DEPTH};
+use zkasper_common::ChainConfig;
+
+const CONFIG: ChainConfig = ChainConfig::MAINNET;
 use zkasper_witness_gen::beacon_api::{
-    AttestationResponse, BeaconApi, CommitteeResponse, HeaderResponse, ValidatorResponse,
+    self, AttestationResponse, BeaconApi, CommitteeResponse, HeaderResponse, ValidatorResponse,
 };
 use zkasper_witness_gen::ssz_state;
 
@@ -61,6 +64,10 @@ const STATE_2: TestState = TestState {
 
 struct SszFileApi {
     states: HashMap<String, Arc<StateData>>,
+    /// Attestations loaded from finality JSON data, keyed by slot string.
+    attestations_by_slot: HashMap<String, Vec<AttestationResponse>>,
+    /// Committees loaded from finality JSON data, keyed by epoch.
+    committees_by_epoch: HashMap<u64, Vec<CommitteeResponse>>,
 }
 
 struct StateData {
@@ -103,7 +110,60 @@ impl SszFileApi {
             );
         }
 
-        SszFileApi { states }
+        SszFileApi {
+            states,
+            attestations_by_slot: HashMap::new(),
+            committees_by_epoch: HashMap::new(),
+        }
+    }
+
+    /// Load finality JSON data (attestations + committees) from a gzipped JSON file.
+    fn load_finality_data(&mut self, path: &str) -> (u64, [u8; 32]) {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+        let mut decoder = GzDecoder::new(file);
+        let mut json_str = String::new();
+        decoder
+            .read_to_string(&mut json_str)
+            .unwrap_or_else(|e| panic!("decompress {path}: {e}"));
+        let data: serde_json::Value =
+            serde_json::from_str(&json_str).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+
+        let target_epoch = data["target_epoch"].as_u64().expect("missing target_epoch");
+        let target_root_hex = data["target_root"]
+            .as_str()
+            .expect("missing target_root")
+            .strip_prefix("0x")
+            .unwrap();
+        let target_root_bytes = hex::decode(target_root_hex).expect("invalid target_root hex");
+        let mut target_root = [0u8; 32];
+        target_root.copy_from_slice(&target_root_bytes);
+
+        // Parse committees
+        let committees_arr = data["committees"].as_array().expect("missing committees");
+        let mut committees = Vec::with_capacity(committees_arr.len());
+        for entry in committees_arr {
+            committees.push(beacon_api::parse_committee_entry(entry).expect("parse committee"));
+        }
+        self.committees_by_epoch.insert(target_epoch, committees);
+
+        // Parse attestations by slot
+        let atts_obj = data["attestations_by_slot"]
+            .as_object()
+            .expect("missing attestations_by_slot");
+        for (slot_str, atts_arr) in atts_obj {
+            let atts = atts_arr
+                .as_array()
+                .expect("attestations not array")
+                .iter()
+                .map(|entry| beacon_api::parse_attestation_entry(entry).expect("parse attestation"))
+                .collect::<Vec<_>>();
+            self.attestations_by_slot.insert(slot_str.clone(), atts);
+        }
+
+        (target_epoch, target_root)
     }
 
     fn get_state(&self, state_id: &str) -> &StateData {
@@ -119,12 +179,18 @@ impl BeaconApi for SszFileApi {
         Ok(self.get_state(state_id).validators.clone())
     }
 
-    async fn get_block_attestations(&self, _block_id: &str) -> Result<Vec<AttestationResponse>> {
-        Ok(vec![])
+    async fn get_block_attestations(&self, block_id: &str) -> Result<Vec<AttestationResponse>> {
+        self.attestations_by_slot
+            .get(block_id)
+            .cloned()
+            .context(format!("no attestations for block {block_id}"))
     }
 
-    async fn get_committees(&self, _state_id: &str, _epoch: u64) -> Result<Vec<CommitteeResponse>> {
-        Ok(vec![])
+    async fn get_committees(&self, _state_id: &str, epoch: u64) -> Result<Vec<CommitteeResponse>> {
+        self.committees_by_epoch
+            .get(&epoch)
+            .cloned()
+            .context(format!("no committees for epoch {epoch}"))
     }
 
     async fn get_header(&self, block_id: &str) -> Result<HeaderResponse> {
@@ -151,19 +217,18 @@ fn test_data_dir() -> PathBuf {
         .join("test_data")
 }
 
-/// Ensure a test state file exists locally, downloading from GitHub release if needed.
-fn ensure_state(state: &TestState) -> String {
+/// Ensure a file exists locally, downloading from GitHub release if needed.
+fn ensure_file(filename: &str) -> String {
     let dir = test_data_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(state.filename);
+    let path = dir.join(filename);
 
     if path.exists() {
         return path.to_str().unwrap().to_string();
     }
 
     let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{}",
-        state.filename
+        "https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{filename}",
     );
     eprintln!("downloading {url} ...");
 
@@ -172,10 +237,14 @@ fn ensure_state(state: &TestState) -> String {
         .status()
         .expect("failed to run curl");
 
-    assert!(status.success(), "failed to download {}", state.filename);
+    assert!(status.success(), "failed to download {filename}");
     eprintln!("  saved to {}", path.display());
 
     path.to_str().unwrap().to_string()
+}
+
+fn ensure_state(state: &TestState) -> String {
+    ensure_file(state.filename)
 }
 
 fn load_one_state() -> (SszFileApi, u64) {
@@ -210,11 +279,11 @@ async fn test_ssz_file_bootstrap() {
     init_tracing();
 
     let (api, slot) = load_one_state();
-    let epoch = slot / SLOTS_PER_EPOCH;
+    let epoch = slot / CONFIG.slots_per_epoch;
     eprintln!("testing bootstrap at slot {slot} (epoch {epoch})");
 
     let (witness, _tree, _epoch_state, total_active_balance, num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot)
             .await
             .unwrap();
 
@@ -235,13 +304,13 @@ async fn test_ssz_file_epoch_diff() {
     init_tracing();
 
     let (api, slot_1, slot_2) = load_two_states();
-    let epoch_1 = slot_1 / SLOTS_PER_EPOCH;
-    let epoch_2 = slot_2 / SLOTS_PER_EPOCH;
+    let epoch_1 = slot_1 / CONFIG.slots_per_epoch;
+    let epoch_2 = slot_2 / CONFIG.slots_per_epoch;
     eprintln!("testing epoch diff: slot {slot_1} (epoch {epoch_1}) -> slot {slot_2} (epoch {epoch_2})");
 
     // Bootstrap at slot_1
     let (_witness, mut tree, epoch_state, total_active_balance, _num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot_1, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot_1)
             .await
             .unwrap();
 
@@ -249,11 +318,11 @@ async fn test_ssz_file_epoch_diff() {
     let (diff_witness, _new_epoch_state, new_balance, _new_num_validators) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &api,
+            &CONFIG,
             &mut tree,
             &epoch_state,
             slot_2,
             total_active_balance,
-            VALIDATORS_TREE_DEPTH,
         )
         .await
         .unwrap();
@@ -299,23 +368,23 @@ async fn bench_epoch_diff_guest_ops() {
     init_tracing();
 
     let (api, slot_1, slot_2) = load_two_states();
-    let epoch_1 = slot_1 / SLOTS_PER_EPOCH;
-    let epoch_2 = slot_2 / SLOTS_PER_EPOCH;
+    let epoch_1 = slot_1 / CONFIG.slots_per_epoch;
+    let epoch_2 = slot_2 / CONFIG.slots_per_epoch;
 
     // Build witness (host-side, not measured)
     let (_witness, mut tree, epoch_state, total_active_balance, _num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot_1, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot_1)
             .await
             .unwrap();
 
     let (diff_witness, _new_epoch_state, _new_balance, _new_num_validators) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &api,
+            &CONFIG,
             &mut tree,
             &epoch_state,
             slot_2,
             total_active_balance,
-            VALIDATORS_TREE_DEPTH,
         )
         .await
         .unwrap();
@@ -463,4 +532,100 @@ async fn bench_epoch_diff_guest_ops() {
     eprintln!("\n  multi-proof auxiliaries: old={}, new={}",
         diff_witness.ssz_multi_proof_1.auxiliaries.len(),
         diff_witness.ssz_multi_proof_2.auxiliaries.len());
+}
+
+// ---------------------------------------------------------------------------
+// Test: finality proof with real mainnet attestations
+// ---------------------------------------------------------------------------
+
+const FINALITY_DATA: &str = "finality_epoch_430529.json.gz";
+
+#[tokio::test]
+#[ignore = "downloads ~320MB, takes ~3min"]
+async fn test_ssz_file_finality() {
+    init_tracing();
+
+    // Load the SSZ state at slot 13776928 (epoch 430529)
+    let path2 = ensure_state(&STATE_2);
+    let mut api = SszFileApi::load(&[(&path2, STATE_2.expected_root)]);
+    let slot = 13_776_928u64;
+    let epoch = slot / CONFIG.slots_per_epoch;
+
+    // Load finality attestation + committee data
+    let finality_path = ensure_file(FINALITY_DATA);
+    let (target_epoch, target_root) = api.load_finality_data(&finality_path);
+    assert_eq!(target_epoch, epoch);
+    eprintln!("target_epoch={target_epoch}, target_root=0x{}", hex::encode(target_root));
+
+    // Bootstrap: build Poseidon tree + get total_active_balance
+    let (_bootstrap_witness, tree, _epoch_state, total_active_balance, _num_validators) =
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot)
+            .await
+            .unwrap();
+    eprintln!("total_active_balance={total_active_balance}");
+
+    // Extract genesis_validators_root and fork_version from SSZ state
+    let raw_ssz = &api.get_state(&slot.to_string()).raw_ssz;
+    let genesis_validators_root = ssz_state::extract_genesis_validators_root(raw_ssz);
+    let fork_version = ssz_state::extract_fork_version(raw_ssz);
+    eprintln!("genesis_validators_root=0x{}", hex::encode(genesis_validators_root));
+    eprintln!("fork_version=0x{}", hex::encode(fork_version));
+
+    // Compute signing domain
+    let signing_domain = zkasper_common::bls::compute_domain(
+        &zkasper_common::bls::DOMAIN_BEACON_ATTESTER,
+        &fork_version,
+        &genesis_validators_root,
+    );
+    eprintln!("signing_domain=0x{}", hex::encode(signing_domain));
+
+    // Build the finality witness
+    let witness = zkasper_witness_gen::witness_finality::build(
+        &api,
+        &CONFIG,
+        &tree,
+        target_epoch,
+        target_root,
+        total_active_balance,
+        signing_domain,
+    )
+    .await
+    .unwrap();
+
+    let num_attestations = witness.attestations.len();
+    let total_attesting_validators: usize =
+        witness.attestations.iter().map(|a| a.attesting_validators.len()).sum();
+    let unique_counted: usize = witness
+        .attestations
+        .iter()
+        .flat_map(|a| &a.attesting_validators)
+        .filter(|v| v.count_balance)
+        .count();
+    let attesting_balance: u64 = witness
+        .attestations
+        .iter()
+        .flat_map(|a| &a.attesting_validators)
+        .filter(|v| v.count_balance)
+        .map(|v| v.active_effective_balance)
+        .sum();
+    eprintln!(
+        "attestations={num_attestations}, total_validators={total_attesting_validators}, \
+         unique={unique_counted}, attesting_balance={attesting_balance} ({:.1}%), \
+         multi_proof_auxiliaries={}",
+        attesting_balance as f64 / total_active_balance as f64 * 100.0,
+        witness.poseidon_multi_proof.auxiliaries.len(),
+    );
+
+    // Verify: run the finality guest verifier (includes real BLS signature checks)
+    let (commitment, block_root) = zkasper_finality_guest::verify_finality(&witness);
+
+    assert_eq!(block_root, target_root);
+    assert_eq!(
+        commitment,
+        zkasper_common::poseidon::accumulator_commitment(
+            &tree.root(),
+            total_active_balance,
+        ),
+    );
+    eprintln!("finality proof verified successfully!");
 }

@@ -7,17 +7,38 @@ use zkasper_common::types::EpochDiffWitness;
 
 /// Core epoch-diff verification logic. Returns (new_accumulator_commitment, new_poseidon_root, new_total_active_balance).
 pub fn verify_epoch_diff(witness: &EpochDiffWitness) -> ([u8; 32], [u8; 32], u64) {
-    verify_epoch_diff_with_depth(witness, zkasper_common::constants::VALIDATORS_TREE_DEPTH)
+    verify_epoch_diff_with_depth(
+        witness,
+        zkasper_common::constants::VALIDATORS_TREE_DEPTH,
+        zkasper_common::constants::POSEIDON_TREE_DEPTH,
+    )
 }
 
-/// Epoch-diff verification with configurable validators tree depth.
-pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> ([u8; 32], [u8; 32], u64) {
+/// Epoch-diff verification with configurable tree depths.
+///
+/// `ssz_depth`: depth of the SSZ validators data tree (40 per spec).
+/// `poseidon_depth`: depth of the Poseidon accumulator tree.
+pub fn verify_epoch_diff_with_depth(
+    witness: &EpochDiffWitness,
+    ssz_depth: u32,
+    poseidon_depth: u32,
+) -> ([u8; 32], [u8; 32], u64) {
     use zkasper_common::poseidon::{compute_poseidon_merkle_root, poseidon_leaf};
     use zkasper_common::ssz::{
         compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root,
         validator_hash_tree_root_pair, verify_field_leaves, verify_field_leaves_no_pubkey_hash,
         verify_ssz_multi_proof,
     };
+
+    // Verify Poseidon siblings length matches expected depth
+    for mutation in &witness.mutations {
+        assert_eq!(
+            mutation.poseidon_siblings.len(),
+            poseidon_depth as usize,
+            "poseidon siblings length mismatch for validator {}",
+            mutation.validator_index,
+        );
+    }
 
     let mut poseidon_root = witness.poseidon_root_1;
     let mut total_active_balance = witness.total_active_balance_1;
@@ -111,8 +132,8 @@ pub fn verify_epoch_diff_with_depth(witness: &EpochDiffWitness, depth: u32) -> (
     }
 
     // Phase 2: SSZ multi-proof verification
-    let ssz_data_root_1 = verify_ssz_multi_proof(&old_ssz_leaves, &witness.ssz_multi_proof_1, depth);
-    let ssz_data_root_2 = verify_ssz_multi_proof(&new_ssz_leaves, &witness.ssz_multi_proof_2, depth);
+    let ssz_data_root_1 = verify_ssz_multi_proof(&old_ssz_leaves, &witness.ssz_multi_proof_1, ssz_depth);
+    let ssz_data_root_2 = verify_ssz_multi_proof(&new_ssz_leaves, &witness.ssz_multi_proof_2, ssz_depth);
 
     // -- Verify SSZ data tree roots link to state roots --
     let validators_field_index = zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX;

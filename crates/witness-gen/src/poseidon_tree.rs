@@ -14,7 +14,7 @@ use zkasper_common::types::ValidatorData;
 /// The full tree root at `depth` is computed by chaining the dense root
 /// through precomputed zero hashes for levels dense_depth..depth.
 pub struct PoseidonTree {
-    /// Full tree depth (e.g. 40 for VALIDATOR_REGISTRY_LIMIT = 2^40).
+    /// Full tree depth (e.g. 22 for POSEIDON_TREE_DEPTH).
     pub(crate) depth: u32,
     /// Dense depth: only levels 0..dense_depth are stored.
     /// `dense_depth = ceil(log2(num_leaves))`, where num_leaves is rounded
@@ -132,6 +132,51 @@ impl PoseidonTree {
         siblings
     }
 
+    /// Build a multi-proof for the given leaf indices.
+    ///
+    /// Collects auxiliary sibling nodes bottom-up, left-to-right — the same
+    /// order the verifier consumes them.
+    pub fn build_multi_proof(&self, leaf_indices: &[u64]) -> zkasper_common::types::MerkleMultiProof {
+        use std::collections::BTreeSet;
+
+        let mut known_at_level: BTreeSet<u64> = leaf_indices.iter().copied().collect();
+        let mut auxiliaries = Vec::new();
+
+        for level in 0..self.depth {
+            let parent_indices: BTreeSet<u64> = known_at_level.iter().map(|&idx| idx / 2).collect();
+
+            for &parent_idx in &parent_indices {
+                let left_idx = parent_idx * 2;
+                let right_idx = parent_idx * 2 + 1;
+
+                if !known_at_level.contains(&left_idx) {
+                    auxiliaries.push(self.get_node(level, left_idx));
+                }
+                if !known_at_level.contains(&right_idx) {
+                    auxiliaries.push(self.get_node(level, right_idx));
+                }
+            }
+
+            known_at_level = parent_indices;
+        }
+
+        zkasper_common::types::MerkleMultiProof { auxiliaries }
+    }
+
+    /// Get the hash of a node at a given level and index.
+    fn get_node(&self, level: u32, idx: u64) -> [u8; 32] {
+        if level < self.dense_depth {
+            let level_data = &self.levels[level as usize];
+            if (idx as usize) < level_data.len() {
+                level_data[idx as usize]
+            } else {
+                self.zero_hashes[level as usize]
+            }
+        } else {
+            self.zero_hashes[level as usize]
+        }
+    }
+
     /// Update a leaf and recompute the path to the dense root.
     /// Returns the siblings BEFORE the update (for the witness).
     ///
@@ -213,20 +258,20 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_tree_depth_40() {
-        // Build a sparse tree with depth 40 but only 100 validators.
-        // This should NOT OOM (allocates ~256 leaves, not 2^40).
+    fn test_sparse_tree_depth_22() {
+        // Build a sparse tree with depth 22 (POSEIDON_TREE_DEPTH) but only 100 validators.
+        // This should NOT OOM (allocates ~256 leaves, not 2^22).
         let validators: Vec<_> = (0..100).map(dummy_validator).collect();
-        let tree = PoseidonTree::build(&validators, 100, 40);
+        let tree = PoseidonTree::build(&validators, 100, 22);
 
-        assert_eq!(tree.depth, 40);
+        assert_eq!(tree.depth, 22);
         assert_eq!(tree.dense_depth, 7); // ceil(log2(100)) = 7 (2^7=128)
         assert_ne!(tree.root(), [0u8; 32]);
 
         // Verify siblings work at full depth
         let leaf = tree.levels[0][0];
         let siblings = tree.get_siblings(0);
-        assert_eq!(siblings.len(), 40);
+        assert_eq!(siblings.len(), 22);
 
         // Verify merkle proof
         use zkasper_common::poseidon::verify_poseidon_merkle_proof;

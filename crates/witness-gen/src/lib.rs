@@ -8,5 +8,7 @@ pub mod state_diff;
 pub mod witness_bootstrap;
 pub mod witness_epoch_diff;
 pub mod witness_finality;
+pub mod witness_justification;
+pub mod witness_slot_proof;
 
 pub use epoch_state::EpochState;

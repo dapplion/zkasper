@@ -96,6 +96,46 @@ pub fn verify_ssz_multi_proof(
     merkle::verify_multi_proof(sha256_pair, leaves, proof, depth)
 }
 
+/// Compute `hash_tree_root(AttestationData)` from its constituent fields.
+///
+/// AttestationData is a 5-field SSZ container merkleized into an 8-leaf tree:
+/// ```text
+/// field[0] = le_pad32(slot)
+/// field[1] = le_pad32(index)
+/// field[2] = beacon_block_root
+/// field[3] = hash_tree_root(source) = sha256(le_pad32(epoch) || root)
+/// field[4] = hash_tree_root(target) = sha256(le_pad32(epoch) || root)
+/// field[5..7] = zero
+/// ```
+pub fn attestation_data_root(
+    slot: u64,
+    index: u64,
+    beacon_block_root: &[u8; 32],
+    source_epoch: u64,
+    source_root: &[u8; 32],
+    target_epoch: u64,
+    target_root: &[u8; 32],
+) -> [u8; 32] {
+    let zero = [0u8; 32];
+
+    let field0 = u64_to_chunk(slot);
+    let field1 = u64_to_chunk(index);
+    let field2 = *beacon_block_root;
+    let field3 = sha256_pair(&u64_to_chunk(source_epoch), source_root);
+    let field4 = sha256_pair(&u64_to_chunk(target_epoch), target_root);
+
+    // Depth-3 tree with 8 leaves (5 data + 3 zero)
+    let n0 = sha256_pair(&field0, &field1);
+    let n1 = sha256_pair(&field2, &field3);
+    let n2 = sha256_pair(&field4, &zero);
+    let n3 = sha256_pair(&zero, &zero);
+
+    let n4 = sha256_pair(&n0, &n1);
+    let n5 = sha256_pair(&n2, &n3);
+
+    sha256_pair(&n4, &n5)
+}
+
 /// Pad a u64 value to a 32-byte LE SSZ chunk.
 pub fn u64_to_chunk(val: u64) -> [u8; 32] {
     let mut chunk = [0u8; 32];

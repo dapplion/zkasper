@@ -5,6 +5,9 @@ members = [
     "crates/epoch-diff-guest",
     "crates/finality-guest",
     "crates/bootstrap-guest",
+    "crates/slot-proof-guest",
+    "crates/justification-guest",
+    "crates/finalization-guest",
 ]
 resolver = "2"
 
@@ -22,6 +25,7 @@ ark-bls12-381 = "0.5"
 ark-ec = "0.5"
 ark-serialize = "0.5"
 light-poseidon = "0.4"
+blst = "0.3"
 
 # Zisk guest OS
-# ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }

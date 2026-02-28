@@ -3,6 +3,18 @@ name = "zkasper-finality-guest"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "zkasper_finality_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkasper-finality-guest"
+path = "src/main.rs"
+
+[features]
+default = []
+bls = ["zkasper-common/bls"]
+
 [dependencies]
 zkasper-common = { path = "../common", default-features = false }
 serde = { workspace = true }
@@ -14,4 +26,4 @@ ark-bls12-381 = { workspace = true }
 ark-ec = { workspace = true }
 ark-serialize = { workspace = true }
 light-poseidon = { workspace = true }
-# ziskos = { workspace = true }
+ziskos = { workspace = true }

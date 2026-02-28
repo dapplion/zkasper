@@ -23,7 +23,7 @@ sha2 = { workspace = true }
 ark-ff = { workspace = true }
 ark-bn254 = { workspace = true }
 light-poseidon = { workspace = true }
-# ziskos = { workspace = true }
+ziskos = { workspace = true }
 
 [dev-dependencies]
 zkasper-common = { path = "../common", features = ["test-utils"] }

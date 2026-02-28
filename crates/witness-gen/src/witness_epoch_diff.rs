@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use tracing::{info, info_span};
 
-use zkasper_common::constants::SLOTS_PER_EPOCH;
+use zkasper_common::ChainConfig;
 use zkasper_common::poseidon::poseidon_leaf;
 use zkasper_common::ssz::validator_hash_tree_root;
 use zkasper_common::types::{BlsPubkey, EpochDiffWitness, ValidatorData, ValidatorMutation};
@@ -25,17 +25,18 @@ use crate::epoch_state::EpochState;
 /// Returns `(witness, new_epoch_state, new_total_active_balance, new_num_validators)`.
 pub async fn build(
     api: &impl BeaconApi,
+    config: &ChainConfig,
     poseidon_tree: &mut PoseidonTree,
     old_state: &EpochState,
     slot_2: u64,
     total_active_balance_1: u64,
-    depth: u32,
 ) -> Result<(EpochDiffWitness, EpochState, u64, u64)> {
     let slot_1 = old_state.slot;
-    let _span = info_span!("epoch_diff", slot_1, slot_2, depth).entered();
+    let ssz_depth = config.validators_tree_depth;
+    let _span = info_span!("epoch_diff", slot_1, slot_2, ssz_depth).entered();
     let slot_2_str = slot_2.to_string();
-    let epoch_1 = slot_1 / SLOTS_PER_EPOCH;
-    let epoch_2 = slot_2 / SLOTS_PER_EPOCH;
+    let epoch_1 = slot_1 / config.slots_per_epoch;
+    let epoch_2 = slot_2 / config.slots_per_epoch;
 
     // Fetch only new validators (old are cached in old_state)
     let validators_2 = {
@@ -82,7 +83,7 @@ pub async fn build(
 
         // Old tree: build from roots (cached or freshly computed)
         let (old_data_root, old_proof) =
-            build_validators_ssz_tree(&old_roots, depth, &mutation_indices);
+            build_validators_ssz_tree(&old_roots, ssz_depth, &mutation_indices);
 
         // New roots: clone old, update only mutations
         let mut new_roots = old_roots;
@@ -94,7 +95,7 @@ pub async fn build(
         }
 
         let (new_data_root, new_proof) =
-            build_validators_ssz_tree(&new_roots, depth, &mutation_indices);
+            build_validators_ssz_tree(&new_roots, ssz_depth, &mutation_indices);
 
         (old_data_root, old_proof, new_data_root, new_proof, new_roots)
     };

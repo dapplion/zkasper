@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --features bls
 
   fmt:
     name: Format
@@ -52,6 +52,67 @@ jobs:
       - name: Run mainnet SSZ tests
         run: cargo test --release --test ssz_file_tests -- --ignored --nocapture
         timeout-minutes: 15
+
+  witness-gen:
+    name: Witness generation smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate test witnesses for all proof types
+        run: |
+          for proof in bootstrap epoch-diff slot-proof justification finalization; do
+            cargo run --release --bin gen-test-witness -- "$proof" "/tmp/${proof}_input.bin"
+          done
+
+  forge:
+    name: Forge tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Install dependencies
+        working-directory: crates/onchain-verifier
+        run: forge install --no-git
+      - name: Run Solidity tests
+        working-directory: crates/onchain-verifier
+        run: forge test -vvv
+
+  zisk-emulator:
+    name: Zisk emulator (${{ matrix.proof-type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        proof-type: [bootstrap, epoch-diff, slot-proof, justification, finalization]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Zisk system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils jq curl build-essential qemu-system \
+            libomp-dev libgmp-dev nlohmann-json3-dev protobuf-compiler uuid-dev \
+            libgrpc++-dev libsecp256k1-dev libsodium-dev libpqxx-dev nasm \
+            libopenmpi-dev openmpi-bin openmpi-common
+
+      - name: Install Zisk toolchain
+        run: |
+          curl -sSf https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/install.sh | bash
+          SETUP_KEY=verify "$HOME/.zisk/bin/ziskup"
+          echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+
+      - name: Generate test witness
+        run: cargo run --release --bin gen-test-witness -- ${{ matrix.proof-type }} crates/${{ matrix.proof-type }}-guest/input.bin
+
+      - name: Build guest ELF for Zisk
+        run: cd crates/${{ matrix.proof-type }}-guest && cargo-zisk build --release
+
+      - name: Run in Zisk emulator
+        run: ziskemu -e target/riscv64ima-zisk-zkvm-elf/release/zkasper-${{ matrix.proof-type }}-guest -i crates/${{ matrix.proof-type }}-guest/input.bin
 
   clippy:
     name: Clippy

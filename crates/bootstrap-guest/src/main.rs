@@ -3,23 +3,44 @@
 // One-time construction of the Poseidon accumulator from the full validator set.
 // Verifies all validators against the SSZ state, builds the Poseidon tree,
 // and outputs the root + total active balance.
-//
-// On Zisk this file would use:
-//   #![no_main]
-//   ziskos::entrypoint!(main);
+#![cfg_attr(target_os = "zkvm", no_main)]
 
 use zkasper_bootstrap_guest::verify_bootstrap;
 use zkasper_common::types::BootstrapWitness;
 
+#[cfg(target_os = "zkvm")]
+ziskos::entrypoint!(main);
+
 fn main() {
+    #[cfg(target_os = "zkvm")]
+    let input = ziskos::read_input_slice();
+    #[cfg(not(target_os = "zkvm"))]
     let input = std::fs::read("input.bin").expect("read input.bin");
+
     let witness: BootstrapWitness = bincode::deserialize(&input).expect("deserialize witness");
 
-    let (commitment, poseidon_root, total_active_balance) = verify_bootstrap(&witness);
+    let (commitment, _poseidon_root, _total_active_balance) = verify_bootstrap(&witness);
 
-    eprintln!("accumulator_commitment: {:x?}", commitment);
-    eprintln!("poseidon_root: {:x?}", poseidon_root);
-    eprintln!("total_active_balance: {}", total_active_balance);
+    // Public outputs: [commitment(8), state_root(8)]
+    #[cfg(target_os = "zkvm")]
+    {
+        write_bytes32_output(0, &commitment);
+        write_bytes32_output(8, &witness.state_root);
+    }
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        eprintln!("accumulator_commitment: {:x?}", commitment);
+        eprintln!("state_root: {:x?}", witness.state_root);
+    }
+}
+
+#[cfg(target_os = "zkvm")]
+fn write_bytes32_output(offset: usize, bytes: &[u8; 32]) {
+    for i in 0..8usize {
+        let b = i * 4;
+        let word = u32::from_le_bytes([bytes[b], bytes[b + 1], bytes[b + 2], bytes[b + 3]]);
+        ziskos::set_output(offset + i, word);
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +119,7 @@ mod tests {
         };
 
         let (commitment, poseidon_root, total_active_balance) =
-            verify_bootstrap_with_depth(&witness, depth);
+            verify_bootstrap_with_depth(&witness, depth, depth);
 
         assert_eq!(poseidon_root, expected_poseidon_root);
         assert_eq!(total_active_balance, 4 * 32_000_000_000);
@@ -139,7 +160,7 @@ mod tests {
             validator_pubkey_chunks: pubkey_chunks,
         };
 
-        let (_, _, total_active_balance) = verify_bootstrap_with_depth(&witness, depth);
+        let (_, _, total_active_balance) = verify_bootstrap_with_depth(&witness, depth, depth);
 
         assert_eq!(
             total_active_balance,

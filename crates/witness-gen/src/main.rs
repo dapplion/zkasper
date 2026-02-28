@@ -8,15 +8,23 @@ mod state_diff;
 mod witness_bootstrap;
 mod witness_epoch_diff;
 mod witness_finality;
+mod witness_justification;
+mod witness_slot_proof;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use zkasper_common::constants::VALIDATORS_TREE_DEPTH;
+use zkasper_common::ChainConfig;
 
 use beacon_api::BeaconApiClient;
 use db::Db;
 use epoch_state::EpochState;
+
+#[derive(Clone, ValueEnum)]
+enum Chain {
+    Mainnet,
+    Gnosis,
+}
 
 #[derive(Parser)]
 #[command(name = "zkasper-witness-gen")]
@@ -33,6 +41,10 @@ struct Cli {
     /// Output directory for witness files
     #[arg(long, default_value = ".")]
     output_dir: String,
+
+    /// Target chain
+    #[arg(long, default_value = "mainnet")]
+    chain: Chain,
 
     #[command(subcommand)]
     command: Command,
@@ -63,6 +75,17 @@ enum Command {
         #[arg(long)]
         signing_domain: String,
     },
+    /// Generate per-slot proof witnesses for a target checkpoint
+    SlotProofs {
+        /// The epoch of the checkpoint to prove
+        epoch: u64,
+        /// Target block root (hex, 0x-prefixed)
+        #[arg(long)]
+        target_root: String,
+        /// Signing domain (hex, 0x-prefixed)
+        #[arg(long)]
+        signing_domain: String,
+    },
     /// Continuous mode: watch for new finalized checkpoints and generate proofs
     Run,
 }
@@ -72,13 +95,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let api = BeaconApiClient::new(&cli.beacon_url);
     let db = Db::new(&cli.db_path);
+    let config = match cli.chain {
+        Chain::Mainnet => ChainConfig::MAINNET,
+        Chain::Gnosis => ChainConfig::GNOSIS,
+    };
 
     match cli.command {
         Command::Bootstrap { slot } => {
             eprintln!("bootstrapping from slot {slot}...");
 
             let (witness, tree, _epoch_state, total_active_balance, num_validators) =
-                witness_bootstrap::build(&api, slot, VALIDATORS_TREE_DEPTH).await?;
+                witness_bootstrap::build(&api, &config, slot).await?;
 
             let epoch = witness.epoch;
 
@@ -111,11 +138,11 @@ async fn main() -> Result<()> {
             let (witness, _new_epoch_state, new_total_active_balance, new_num_validators) =
                 witness_epoch_diff::build(
                     &api,
+                    &config,
                     &mut tree,
                     &old_state,
                     slot2,
                     total_active_balance,
-                    VALIDATORS_TREE_DEPTH,
                 )
                 .await?;
 
@@ -156,6 +183,7 @@ async fn main() -> Result<()> {
 
             let witness = witness_finality::build(
                 &api,
+                &config,
                 &tree,
                 epoch,
                 target_root,
@@ -171,6 +199,66 @@ async fn main() -> Result<()> {
             eprintln!(
                 "wrote {output_path} ({} bytes)",
                 std::fs::metadata(&output_path)?.len()
+            );
+        }
+
+        Command::SlotProofs {
+            epoch,
+            target_root,
+            signing_domain,
+        } => {
+            eprintln!("slot proofs for epoch {epoch}...");
+
+            let (tree, _cursor_epoch, total_active_balance, _num_validators) = db
+                .load()?
+                .context("no saved state — run bootstrap + epoch-diff first")?;
+
+            let target_root = parse_hex_bytes32(&target_root)?;
+            let signing_domain = parse_hex_bytes32(&signing_domain)?;
+
+            let slot_witnesses = witness_slot_proof::build_per_slot(
+                &api,
+                &config,
+                &tree,
+                epoch,
+                target_root,
+                total_active_balance,
+                signing_domain,
+            )
+            .await?;
+
+            eprintln!("built {} slot proof witnesses", slot_witnesses.len());
+
+            // Serialize each slot witness
+            for sw in &slot_witnesses {
+                let output_path = format!(
+                    "{}/slot_proof_input_{}.bin",
+                    cli.output_dir, sw.slot
+                );
+                let bytes =
+                    bincode::serialize(&sw.witness).context("serialize slot proof witness")?;
+                std::fs::write(&output_path, &bytes).context("write slot proof witness")?;
+                eprintln!(
+                    "  slot {}: {} bytes, {} counted validators",
+                    sw.slot,
+                    bytes.len(),
+                    sw.counted_indices.len(),
+                );
+            }
+
+            // Also serialize the justification witness (aggregates slot outputs)
+            // The slot proof outputs would come from running the provers,
+            // but for now we can pre-build the justification metadata.
+            let output_path = format!("{}/slot_proofs_metadata.bin", cli.output_dir);
+            let metadata: Vec<(u64, Vec<u64>)> = slot_witnesses
+                .iter()
+                .map(|sw| (sw.slot, sw.counted_indices.clone()))
+                .collect();
+            let bytes = bincode::serialize(&metadata).context("serialize metadata")?;
+            std::fs::write(&output_path, &bytes).context("write metadata")?;
+            eprintln!(
+                "wrote {output_path} ({} bytes)",
+                bytes.len(),
             );
         }
 

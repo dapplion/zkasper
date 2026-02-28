@@ -8,13 +8,18 @@ use zkasper_common::types::BootstrapWitness;
 
 /// Core bootstrap verification logic. Returns (accumulator_commitment, poseidon_root, total_active_balance).
 pub fn verify_bootstrap(witness: &BootstrapWitness) -> ([u8; 32], [u8; 32], u64) {
-    verify_bootstrap_with_depth(witness, zkasper_common::constants::VALIDATORS_TREE_DEPTH)
+    verify_bootstrap_with_depth(
+        witness,
+        zkasper_common::constants::VALIDATORS_TREE_DEPTH,
+        zkasper_common::constants::POSEIDON_TREE_DEPTH,
+    )
 }
 
-/// Bootstrap verification with a configurable tree depth (for testing with small trees).
+/// Bootstrap verification with configurable tree depths (for testing with small trees).
 pub fn verify_bootstrap_with_depth(
     witness: &BootstrapWitness,
-    depth: u32,
+    ssz_depth: u32,
+    poseidon_depth: u32,
 ) -> ([u8; 32], [u8; 32], u64) {
     let num_validators = witness.validators.len();
     let mut total_active_balance: u64 = 0;
@@ -38,7 +43,7 @@ pub fn verify_bootstrap_with_depth(
         total_active_balance += active_balance;
     }
 
-    let ssz_data_root = rebuild_tree(&validator_roots, zkasper_common::ssz::sha256_pair, depth);
+    let ssz_data_root = rebuild_tree(&validator_roots, zkasper_common::ssz::sha256_pair, ssz_depth);
     let validators_root = list_hash_tree_root(&ssz_data_root, num_validators as u64);
     let computed_state_root = compute_ssz_merkle_root(
         &validators_root,
@@ -50,7 +55,7 @@ pub fn verify_bootstrap_with_depth(
         "state root mismatch"
     );
 
-    let poseidon_root = rebuild_tree(&poseidon_leaves, poseidon_pair, depth);
+    let poseidon_root = rebuild_tree(&poseidon_leaves, poseidon_pair, poseidon_depth);
     let commitment = accumulator_commitment(&poseidon_root, total_active_balance);
 
     (commitment, poseidon_root, total_active_balance)

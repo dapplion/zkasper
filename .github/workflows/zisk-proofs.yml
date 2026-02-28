@@ -1,0 +1,34 @@
+name: Zisk Proofs
+
+# Full ZK proof generation + verification. Needs ~11GB RAM and ~8 min per proof.
+# Runs nightly and on manual trigger. Requires a self-hosted runner with enough resources.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *" # 3 AM UTC daily
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prove:
+    name: Prove (${{ matrix.proof-type }})
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        proof-type: [bootstrap, epoch-diff, slot-proof, justification, finalization]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Zisk toolchain
+        run: |
+          curl -sSf https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/install.sh | bash
+          SETUP_KEY=proving "$HOME/.zisk/bin/ziskup"
+          echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+
+      - name: Run full proof pipeline
+        run: bash scripts/test_zisk_proof.sh ${{ matrix.proof-type }}
+        timeout-minutes: 60

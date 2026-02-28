@@ -72,7 +72,7 @@ pub struct ValidatorMutation {
     /// Raw pubkey split into 2x32-byte SSZ chunks (to verify field_leaves[0]).
     pub old_pubkey_chunks: [[u8; 32]; 2],
     pub new_pubkey_chunks: [[u8; 32]; 2],
-    /// Poseidon Merkle siblings (depth 40).
+    /// Poseidon Merkle siblings (depth = POSEIDON_TREE_DEPTH).
     pub poseidon_siblings: Vec<[u8; 32]>,
 }
 
@@ -111,18 +111,23 @@ pub struct AttestingValidator {
     pub validator_index: u64,
     pub pubkey: BlsPubkey,
     pub active_effective_balance: u64,
-    /// Poseidon Merkle siblings (depth 40).
-    pub poseidon_siblings: Vec<[u8; 32]>,
+    /// Whether this validator's balance should be counted towards the
+    /// attesting total. False when the same validator appears in an
+    /// earlier attestation (prevents double-counting).
+    pub count_balance: bool,
 }
 
 /// One aggregated attestation for the finality proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttestationWitness {
-    /// `hash_tree_root(AttestationData)` — the guest trusts this is correctly
-    /// derived from an `AttestationData` whose `target` matches the claimed
-    /// finalized checkpoint. Full verification of the other AttestationData
-    /// fields is deferred to V2.
-    pub attestation_data_root: [u8; 32],
+    // -- Raw AttestationData fields (circuit recomputes hash_tree_root) --
+    pub data_slot: u64,
+    pub data_index: u64,
+    pub data_beacon_block_root: [u8; 32],
+    pub data_source_epoch: u64,
+    pub data_source_root: [u8; 32],
+    pub data_target_epoch: u64,
+    pub data_target_root: [u8; 32],
     /// Aggregate BLS signature over the signing root.
     pub signature: BlsSignature,
     /// All validators that participated (bit set in aggregation_bits).
@@ -148,7 +153,95 @@ pub struct FinalityWitness {
 
     // -- attestations --
     pub attestations: Vec<AttestationWitness>,
+
+    /// Poseidon multi-proof for all unique attesting validators at once.
+    /// Proves every (poseidon_leaf, validator_index) against poseidon_root.
+    pub poseidon_multi_proof: MerkleMultiProof,
 }
+
+// ---------------------------------------------------------------------------
+// Slot-level proving types (incremental architecture)
+// ---------------------------------------------------------------------------
+
+/// Public outputs of a slot proof.
+///
+/// After recursive verification, the justification circuit sees only these values.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SlotProofOutput {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    /// Sum of `active_effective_balance` for validators with `count_balance=true`.
+    pub attesting_balance: u64,
+    /// Poseidon hash chain over sorted counted validator indices.
+    pub counted_validators_commitment: [u8; 32],
+    /// Number of counted validators (for commitment verification).
+    pub num_counted_validators: u64,
+}
+
+/// Witness for a slot proof (one block's attestations).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SlotProofWitness {
+    // -- public inputs --
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub signing_domain: [u8; 32],
+
+    // -- private witness --
+    pub poseidon_root: [u8; 32],
+    pub total_active_balance: u64,
+    pub attestations: Vec<AttestationWitness>,
+    pub poseidon_multi_proof: MerkleMultiProof,
+}
+
+/// Public outputs of a justification proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JustificationOutput {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+}
+
+/// Witness for a justification proof (aggregates slot proofs).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JustificationWitness {
+    // -- public inputs --
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub total_active_balance: u64,
+
+    // -- slot proof outputs (verified recursively via ziskos::verify_proof) --
+    pub slot_proof_outputs: Vec<SlotProofOutput>,
+    /// Opaque proof bytes per slot (empty in native testing mode).
+    pub slot_proof_proofs: Vec<Vec<u8>>,
+
+    // -- dedup witness: per-slot sorted counted validator indices --
+    pub counted_indices_per_slot: Vec<Vec<u64>>,
+}
+
+/// Public outputs of a finalization proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FinalizationOutput {
+    pub accumulator_commitment: [u8; 32],
+    pub finalized_epoch: u64,
+    pub finalized_root: [u8; 32],
+}
+
+/// Witness for a finalization proof (pairs two consecutive justifications).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FinalizationWitness {
+    pub accumulator_commitment: [u8; 32],
+    /// Justification outputs for epochs E and E+1.
+    pub justification_outputs: Vec<JustificationOutput>,
+    /// Opaque proof bytes for each justification (empty in native testing mode).
+    pub justification_proofs: Vec<Vec<u8>>,
+}
+
+// ---------------------------------------------------------------------------
+// Original types
+// ---------------------------------------------------------------------------
 
 /// Witness for Bootstrap: one-time Poseidon tree construction.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -12,9 +12,12 @@ mod common;
 
 use anyhow::Result;
 
-use zkasper_common::constants::{SLOTS_PER_EPOCH, VALIDATORS_TREE_DEPTH};
+use zkasper_common::constants::{POSEIDON_TREE_DEPTH, VALIDATORS_TREE_DEPTH};
+use zkasper_common::ChainConfig;
 use zkasper_common::poseidon::accumulator_commitment;
 use zkasper_common::ssz::list_hash_tree_root;
+
+const CONFIG: ChainConfig = ChainConfig::MAINNET;
 
 use zkasper_witness_gen::beacon_api::{BeaconApi, BeaconApiClient};
 use zkasper_witness_gen::ssz_state;
@@ -29,8 +32,8 @@ fn get_api() -> BeaconApiClient {
 async fn get_finalized_slot(api: &BeaconApiClient) -> Result<u64> {
     let header = api.get_header("finalized").await?;
     // Round down to epoch boundary
-    let epoch = header.slot / SLOTS_PER_EPOCH;
-    Ok(epoch * SLOTS_PER_EPOCH)
+    let epoch = header.slot / CONFIG.slots_per_epoch;
+    Ok(epoch * CONFIG.slots_per_epoch)
 }
 
 // -----------------------------------------------------------------------
@@ -88,12 +91,12 @@ async fn test_ssz_state_parsing() {
 async fn test_real_bootstrap() {
     let api = get_api();
     let slot = get_finalized_slot(&api).await.unwrap();
-    let epoch = slot / SLOTS_PER_EPOCH;
+    let epoch = slot / CONFIG.slots_per_epoch;
 
     eprintln!("testing real bootstrap at slot {slot} (epoch {epoch})");
 
     let (witness, tree, _epoch_state, total_active_balance, num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot)
             .await
             .unwrap();
 
@@ -108,7 +111,7 @@ async fn test_real_bootstrap() {
 
     // Verify with bootstrap guest
     let (commitment, poseidon_root, balance) =
-        zkasper_bootstrap_guest::verify_bootstrap_with_depth(&witness, VALIDATORS_TREE_DEPTH);
+        zkasper_bootstrap_guest::verify_bootstrap_with_depth(&witness, VALIDATORS_TREE_DEPTH, POSEIDON_TREE_DEPTH);
 
     assert_eq!(poseidon_root, tree.root());
     assert_eq!(balance, total_active_balance);
@@ -127,17 +130,17 @@ async fn test_real_bootstrap() {
 async fn test_real_epoch_diff() {
     let api = get_api();
     let slot_2 = get_finalized_slot(&api).await.unwrap();
-    let epoch_2 = slot_2 / SLOTS_PER_EPOCH;
+    let epoch_2 = slot_2 / CONFIG.slots_per_epoch;
 
     // Go back one epoch for slot_1
     assert!(epoch_2 >= 1, "need at least epoch 1");
-    let slot_1 = (epoch_2 - 1) * SLOTS_PER_EPOCH;
+    let slot_1 = (epoch_2 - 1) * CONFIG.slots_per_epoch;
 
     eprintln!("testing real epoch diff: slot {slot_1} -> {slot_2}");
 
     // Bootstrap at slot_1
     let (bootstrap_witness, mut tree, epoch_state, total_active_balance, num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot_1, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot_1)
             .await
             .unwrap();
 
@@ -148,6 +151,7 @@ async fn test_real_epoch_diff() {
         zkasper_bootstrap_guest::verify_bootstrap_with_depth(
             &bootstrap_witness,
             VALIDATORS_TREE_DEPTH,
+            POSEIDON_TREE_DEPTH,
         );
     assert_eq!(bootstrap_root, tree.root());
     assert_eq!(bootstrap_balance, total_active_balance);
@@ -156,11 +160,11 @@ async fn test_real_epoch_diff() {
     let (diff_witness, _new_epoch_state, new_balance, new_num_validators) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &api,
+            &CONFIG,
             &mut tree,
             &epoch_state,
             slot_2,
             total_active_balance,
-            VALIDATORS_TREE_DEPTH,
         )
         .await
         .unwrap();
@@ -191,15 +195,15 @@ async fn test_real_epoch_diff() {
 async fn test_real_full_pipeline() {
     let api = get_api();
     let slot_2 = get_finalized_slot(&api).await.unwrap();
-    let epoch_2 = slot_2 / SLOTS_PER_EPOCH;
+    let epoch_2 = slot_2 / CONFIG.slots_per_epoch;
     assert!(epoch_2 >= 1, "need at least epoch 1");
-    let slot_1 = (epoch_2 - 1) * SLOTS_PER_EPOCH;
+    let slot_1 = (epoch_2 - 1) * CONFIG.slots_per_epoch;
 
     eprintln!("testing real full pipeline: slot {slot_1} -> {slot_2}");
 
     // Bootstrap
     let (bootstrap_witness, tree, _epoch_state, total_active_balance, num_validators) =
-        zkasper_witness_gen::witness_bootstrap::build(&api, slot_1, VALIDATORS_TREE_DEPTH)
+        zkasper_witness_gen::witness_bootstrap::build(&api, &CONFIG, slot_1)
             .await
             .unwrap();
 
@@ -207,6 +211,7 @@ async fn test_real_full_pipeline() {
     let (_bootstrap_commitment, _, _) = zkasper_bootstrap_guest::verify_bootstrap_with_depth(
         &bootstrap_witness,
         VALIDATORS_TREE_DEPTH,
+        POSEIDON_TREE_DEPTH,
     );
 
     // Save to DB
@@ -230,11 +235,11 @@ async fn test_real_full_pipeline() {
     let (diff_witness, _new_epoch_state, new_balance, new_count) =
         zkasper_witness_gen::witness_epoch_diff::build(
             &api,
+            &CONFIG,
             &mut loaded_tree,
             &old_state,
             slot_2,
             loaded_balance,
-            VALIDATORS_TREE_DEPTH,
         )
         .await
         .unwrap();

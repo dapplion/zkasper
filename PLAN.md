@@ -142,7 +142,14 @@ pub struct AttestingValidator {
 }
 
 pub struct AttestationWitness {
-    pub attestation_data_root: [u8; 32],
+    // Raw AttestationData fields (circuit recomputes hash_tree_root and verifies target)
+    pub data_slot: u64,
+    pub data_index: u64,
+    pub data_beacon_block_root: [u8; 32],
+    pub data_source_epoch: u64,
+    pub data_source_root: [u8; 32],
+    pub data_target_epoch: u64,
+    pub data_target_root: [u8; 32],
     pub signature: BlsSignature,
     pub attesting_validators: Vec<AttestingValidator>,
 }
@@ -345,12 +352,322 @@ Verifier interface depends on Zisk's proof format (likely Groth16/FFLONK wrapper
 16. **`witness-gen/witness_bootstrap.rs`**: bootstrap witness assembly
 17. **`onchain-verifier/ZkasperVerifier.sol`**: Solidity contract
 
+## proposed architecture: incremental slot-level proving
+
+### motivation
+
+The monolithic finality proof is expensive — it must verify BLS signatures for ~660K validators and a Poseidon multi-proof for all of them in one circuit. By breaking it into per-slot proofs, we get:
+
+- **Incremental proving**: Start proving as blocks arrive, don't wait for 2/3
+- **Parallelism**: Each slot proof is independent, can be proven concurrently
+- **Smaller circuits**: Each slot proof covers one block's attestations (~10-20 attestations, ~10-50K validators)
+- **Natural recursive composition**: Aggregate slot proofs into justification, justifications into finalization
+
+### proof hierarchy
+
+```
+                      ┌─────────────────────┐
+                      │  Finalization Proof  │
+                      │                      │
+                      │  Verifies:           │
+                      │  - justification_N   │
+                      │  - justification_N-1 │
+                      └──────────┬───────────┘
+                           ┌─────┴─────┐
+                           │           │
+                ┌──────────▼──┐  ┌─────▼──────────┐
+                │ Justif. N-1 │  │ Justif. N       │
+                │ (previous)  │  │ (new)           │
+                │             │  │                 │
+                │ Aggregates  │  │ Aggregates      │
+                │ slot proofs │  │ slot proofs     │
+                │ until ≥2/3  │  │ until ≥2/3      │
+                └─────────────┘  └────────┬────────┘
+                                    ┌─────┴─────┐
+                          ┌─────────▼──┐  ┌─────▼─────────┐
+                          │ Slot Proof │  │ Slot Proof    │  ...
+                          │ slot S     │  │ slot S+1      │
+                          │            │  │               │
+                          │ BLS verify │  │ BLS verify    │
+                          │ + Poseidon │  │ + Poseidon    │
+                          │ multi-proof│  │ multi-proof   │
+                          └────────────┘  └───────────────┘
+```
+
+### 1. Slot proof (per-block)
+
+Produced for each block as it arrives. Proves: "these attestations in block B at slot S are valid and contribute X balance toward target checkpoint (epoch, root)."
+
+**Circuit inputs (public)**:
+- `accumulator_commitment` — binds to the current validator set
+- `target_epoch`, `target_root` — the checkpoint being voted for
+- `signing_domain` — domain for BLS verification
+
+**Circuit outputs (public)**:
+- `attesting_balance` — sum of unique validator balances in this block's attestations
+- `unique_validator_bitmap_commitment` — commitment to which validators attested (for dedup across slots)
+
+**Circuit logic**:
+1. For each attestation in the block:
+   - Verify BLS aggregate signature over `signing_root(attestation_data_root, signing_domain)`
+   - Verify each validator's `(pubkey, balance)` via Poseidon multi-proof against `poseidon_root`
+2. Sum unique attesting balances
+3. Commit to the set of validator indices (for dedup in aggregation)
+
+**Witness**: attestations from one block + Poseidon multi-proof for that block's validators
+
+### 2. Justification proof (aggregation)
+
+Aggregates slot proofs until attesting balance ≥ 2/3 of total. This is a recursive proof that verifies N slot proofs.
+
+**Circuit inputs (public)**:
+- `accumulator_commitment`
+- `target_epoch`, `target_root`
+- `total_active_balance`
+
+**Circuit outputs (public)**:
+- `justified` = true (asserted by the 2/3 check)
+
+**Circuit logic**:
+1. Recursively verify each slot proof
+2. Deduplicate validators across slots (using bitmap commitments)
+3. Sum unique attesting balance across all slots
+4. Assert `attesting_balance * 3 >= total_active_balance * 2`
+
+**Cross-slot balance deduplication**: A validator may attest in multiple blocks (included in different slots). Its balance must only be counted once toward the 2/3 threshold across all slot proofs for the same target checkpoint. This is a critical correctness requirement.
+
+**Approach — witness-generator dedup with in-circuit uniqueness check**:
+The witness generator tracks which validators have already been counted across earlier slots (via a running `seen_validators` set). For each slot witness, each validator carries a `count_balance` flag — `true` only for its first occurrence globally. The circuit enforces correctness by:
+1. Within each slot proof: all validators with `count_balance=true` must have strictly increasing indices (no intra-slot duplicates)
+2. Each slot proof outputs a **sorted list commitment** of its `count_balance=true` validator indices
+3. At the justification level: merge the sorted lists from all slot proofs and verify the merged list is strictly increasing (no cross-slot duplicates)
+
+This avoids expensive bitmaps or running accumulators inside the circuit. The witness generator does the heavy lifting; the circuit only verifies a sorted-merge property.
+
+**Alternative approaches considered**:
+- **Bitmap**: Commit to a bitfield of size `num_validators`. Each slot proof sets bits. Merge via OR. Count set bits × balance. Expensive in-circuit (~2M bits).
+- **Running accumulator**: Each slot proof takes the previous slot's "seen set" as input, adds its validators, outputs updated set. Sequential — kills parallelism.
+- **No dedup (protocol guarantees)**: Double-voting for same target is a slashable offense, so duplicates shouldn't exist in honest blocks. But we can't assume honest proposers — must enforce in-circuit.
+
+### 3. Finalization proof
+
+Casper FFG rule: epoch E is finalized when both E and E+1 are justified (with E+1's target being a descendant of E's target).
+
+**Circuit inputs (public)**:
+- `accumulator_commitment`
+- `finalized_epoch`, `finalized_root`
+
+**Circuit logic**:
+1. Verify `justification_proof_N` (for epoch E+1)
+2. Verify `justification_proof_N_minus_1` (for epoch E)
+3. Assert both target epochs are consecutive
+4. Output `finalized_root` = epoch E's target root
+
+**Key optimization**: The next finalization proof for epoch E+1 reuses `justification_proof_N` as the "previous" justification. Only one new justification proof needs to be produced per epoch.
+
+```
+Finalization of epoch E:
+  = justify(E) + justify(E+1)
+
+Finalization of epoch E+1:
+  = justify(E+1)  ← already have this!
+  + justify(E+2)  ← only this is new
+```
+
+### proof chain summary
+
+```
+Time ───────────────────────────────────────────────────►
+
+Bootstrap ──► EpochDiff ──► EpochDiff ──► ...
+   │              │              │
+   ▼              ▼              ▼
+ acc_0          acc_1          acc_2        (accumulator commitments)
+   │              │              │
+   ▼              ▼              ▼
+ SlotProofs    SlotProofs    SlotProofs     (per-block, as blocks arrive)
+   │              │              │
+   ▼              ▼              ▼
+ Justify(E)   Justify(E+1)  Justify(E+2)   (aggregate when ≥2/3)
+       \          / \          /
+        ▼        ▼   ▼       ▼
+      Finalize(E)   Finalize(E+1)          (pair consecutive justifications)
+```
+
+### what changes from current code
+
+The current `finality-guest` does everything in one monolithic proof. To implement the slot-level architecture:
+
+1. **Split `finality-guest` into `slot-proof-guest`**: Verifies attestations from one block. Much smaller circuit.
+
+2. **New `justification-guest`**: Recursively verifies slot proofs, deduplicates validators, checks 2/3. This is the recursive aggregation layer.
+
+3. **New `finalization-guest`**: Verifies two justification proofs for consecutive epochs. Lightweight — just two recursive proof verifications + epoch check.
+
+4. **`attestation_collector`**: Instead of collecting all attestations at once, produce one witness per slot. The early-stopping logic moves to the justification level.
+
+5. **`witness_finality`**: Splits into `witness_slot_proof` (one per block) and `witness_justification` (aggregates slot proofs).
+
+## implementation plan
+
+### step 1: new types in `crates/common/src/types.rs`
+
+```rust
+pub struct SlotProofOutput {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub attesting_balance: u64,
+    pub counted_validators_commitment: [u8; 32],
+    pub num_counted_validators: u64,
+}
+
+pub struct SlotProofWitness {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub signing_domain: [u8; 32],
+    pub poseidon_root: [u8; 32],
+    pub total_active_balance: u64,
+    pub attestations: Vec<AttestationWitness>,
+    pub poseidon_multi_proof: MerkleMultiProof,
+}
+
+pub struct JustificationWitness {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub total_active_balance: u64,
+    pub slot_proof_outputs: Vec<SlotProofOutput>,
+    pub slot_proof_proofs: Vec<Vec<u8>>,
+    pub counted_indices_per_slot: Vec<Vec<u64>>,
+}
+
+pub struct JustificationOutput {
+    pub accumulator_commitment: [u8; 32],
+    pub target_epoch: u64,
+    pub target_root: [u8; 32],
+    pub justified: bool,
+}
+
+pub struct FinalizationWitness {
+    pub accumulator_commitment: [u8; 32],
+    pub justification_outputs: [JustificationOutput; 2],
+    pub justification_proofs: [Vec<u8>; 2],
+}
+```
+
+### step 2: counted validators commitment in `crates/common/src/poseidon.rs`
+
+`counted_validators_commitment(sorted_indices) -> [u8; 32]` — Poseidon hash chain: `fold(indices, |acc, idx| poseidon_pair(acc, pad32(idx)))` starting from `pad32(count)`.
+
+### step 3: new crate `crates/slot-proof-guest/`
+
+`verify_slot_proof(witness) -> SlotProofOutput`:
+1. Verify accumulator_commitment = poseidon(poseidon_root, total_active_balance)
+2. Per attestation: collect validators, enforce strictly increasing, accumulate counted balance
+3. Sort multi_proof_leaves by index, verify no duplicates
+4. Verify Poseidon multi-proof against poseidon_root
+5. BLS verify each attestation
+6. Compute counted_validators_commitment
+7. Return SlotProofOutput (**no 2/3 check** — justification's job)
+
+### step 4: new crate `crates/justification-guest/`
+
+`verify_justification(witness) -> JustificationOutput`:
+1. Per slot proof: `ziskos::verify_proof()`, assert matching accumulator/target/domain, re-hash indices → verify commitment, accumulate balance
+2. Cross-slot dedup: merge sorted per-slot indices, verify globally strictly increasing
+3. Assert `attesting_balance * 3 >= total_active_balance * 2`
+
+### step 5: new crate `crates/finalization-guest/`
+
+`verify_finalization(witness) -> (epoch, root)`:
+1. Verify two justification proofs (recursive)
+2. Assert same accumulator_commitment, consecutive epochs
+3. Output `(finalized_epoch, finalized_root)`
+
+### step 6: refactor `crates/witness-gen/src/attestation_collector.rs`
+
+Add `collect_per_slot_for_checkpoint()` — groups by block slot, cross-slot dedup, no early stopping.
+
+### step 7–8: new witness builders
+
+- `witness_slot_proof.rs`: `build_per_slot()` → per-slot Poseidon multi-proofs
+- `witness_justification.rs`: `build()` → assembles from slot proof outputs
+
+### step 9: update CLI, step 10: tests
+
+### files to create
+
+- `crates/slot-proof-guest/{Cargo.toml,src/lib.rs,src/main.rs}`
+- `crates/justification-guest/{Cargo.toml,src/lib.rs,src/main.rs}`
+- `crates/finalization-guest/{Cargo.toml,src/lib.rs,src/main.rs}`
+- `crates/witness-gen/src/{witness_slot_proof.rs,witness_justification.rs}`
+
+### files to modify
+
+- `Cargo.toml` — add 3 new workspace members
+- `crates/common/src/types.rs` — add new types
+- `crates/common/src/poseidon.rs` — add counted_validators_commitment
+- `crates/witness-gen/src/attestation_collector.rs` — add collect_per_slot_for_checkpoint
+- `crates/witness-gen/src/{lib.rs,main.rs}` — new modules + CLI subcommands
+- `crates/witness-gen/tests/integration_tests.rs` — slot proof + justification tests
+
+## completed work
+
+- [x] BLS aggregate signature verification (blst crate, cfg-gated)
+- [x] Fetch JSON attestation/committee data from beacon API
+- [x] Upload finality test data to GitHub release
+- [x] SSZ state extraction helpers (genesis_validators_root, fork_version)
+- [x] SszFileApi extended for attestations + committees
+- [x] Poseidon multi-proof (verify + build)
+- [x] Attestation collector with dedup + early stopping at 2/3
+- [x] Finality guest verifier (monolithic, passing with real mainnet data)
+- [x] Separate POSEIDON_TREE_DEPTH (22) from SSZ VALIDATORS_TREE_DEPTH (40)
+- [x] End-to-end test: 66 attestations, 657K validators, 68.5% balance, BLS verified
+- [x] Incremental slot-level proving architecture (steps 1-8, 10)
+  - slot-proof-guest, justification-guest, finalization-guest crates
+  - counted_validators_commitment (Poseidon hash chain for cross-slot dedup)
+  - verify_proof stub in common/recursion.rs (no-op, replaced by ziskos::verify_proof on Zisk)
+  - collect_per_slot_for_checkpoint in attestation_collector
+  - witness_slot_proof.rs and witness_justification.rs builders
+  - Integration tests: justification round-trip, finalization round-trip, dedup rejection, full pipeline
+- [x] Attestation target soundness fix: circuits recompute `attestation_data_root` from raw `AttestationData` fields and assert `target_epoch`/`target_root` match the claimed checkpoint (both slot-proof-guest and finality-guest)
+- [x] Removed `signing_domain` from `SlotProofOutput` (private to slot proof, not a public output)
+
+## CI / testing
+
+CI must test the full end-to-end pipeline with real Zisk proofs and verification:
+
+1. **Native tests** (`cargo test --workspace --features bls`): unit tests + e2e test running guest logic natively
+2. **Witness generation smoke test**: `gen-test-witness` for all proof types (bootstrap, epoch-diff, slot-proof, justification, finalization)
+3. **Zisk proof pipeline**: for each proof type, run the full `scripts/test_zisk_proof.sh` flow:
+   - Generate witness (`gen-test-witness`)
+   - Build guest ELF for RISC-V (`cargo-zisk build`)
+   - Execute in Zisk emulator (`ziskemu`)
+   - ROM setup (`cargo-zisk rom-setup`)
+   - Generate proof (`cargo-zisk prove`)
+   - Verify proof (`cargo-zisk verify`)
+4. **Forge unit tests** (available now): deploy `ZkasperVerifier.sol` with mock verifiers, test
+   contract logic (state transitions, access control, event emission)
+5. **On-chain verification with real proofs** (blocked on Zisk SNARK wrapper):
+   - `cargo-zisk prove -f` wraps STARK proof into a final SNARK (FFLONK/Groth16)
+   - Zisk team needs to ship a Solidity verifier contract that implements `IZiskVerifier`
+   - Once available: deploy real verifier, feed proof bytes + public outputs, assert on-chain
+   - Pipeline: gen witness → build ELF → prove -f → export verifier.sol → forge test
+   - **Status**: `cargo-zisk prove -f` flag exists but no public docs on Solidity verifier
+     generation yet. The `stark-recurser` repo (Circom) and `pil-fflonk` handle the
+     recursion pipeline but don't export a verifier contract. Ask Jordi.
+
+Requires: `ziskup` (Zisk toolchain installer), `foundry` (forge/cast).
+
 ## open questions for Jordi / Zisk team
 
 1. **Poseidon precompile** — no dedicated Poseidon syscall exists. Poseidon through `arith256_mod` works but is the dominant cost (~28M calls in finality proof). Is a Poseidon precompile planned?
 2. **BLS12-381 pairing** — precompile list shows curve_add/dbl + complex field ops but no explicit pairing. Does `zisk-patch-bls12-381` implement full pairing via these? Cost per pairing?
 3. **Recursive proof composition** — bootstrap needs chunking. Is recursive verification available in Zisk?
 4. **Public inputs vs outputs** — how does the on-chain verifier bind proof public inputs? Is `set_output` the only mechanism?
+9. **Solidity verifier** — does `cargo-zisk prove -f` (final_snark) produce a proof verifiable on-chain? How do we get the Solidity verifier contract (`IZiskVerifier` impl)? Is there a `cargo-zisk export-verifier` or snarkjs-style command? What proof format does the on-chain verifier expect (bytes + uint32[] publicOutputs)?
 5. **`arith256_mod` generality** — does it work for arbitrary 256-bit moduli (BN254 Fr for Poseidon) or only curve-specific moduli?
 6. **Max cycle count** — what's the practical limit for a single proof? Can finality proof (~28M Poseidon) fit?
 7. **Hash-to-G2** — is there a Zisk-optimized implementation of IETF hash-to-curve for BLS12-381?

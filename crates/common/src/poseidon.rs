@@ -58,6 +58,27 @@ pub fn accumulator_commitment(poseidon_root: &[u8; 32], total_active_balance: u6
     fr_to_bytes(&hash)
 }
 
+/// Compute a hash-chain commitment over sorted validator indices.
+///
+/// `commitment = fold(indices, |acc, idx| poseidon_pair(acc, pad32(idx)))`,
+/// starting from `pad32(count)` where `count = sorted_indices.len()`.
+///
+/// Returns `[0u8; 32]` for an empty list.
+pub fn counted_validators_commitment(sorted_indices: &[u64]) -> [u8; 32] {
+    if sorted_indices.is_empty() {
+        return [0u8; 32];
+    }
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(&(sorted_indices.len() as u64).to_le_bytes());
+    let mut acc = buf;
+    for &idx in sorted_indices {
+        let mut idx_bytes = [0u8; 32];
+        idx_bytes[..8].copy_from_slice(&idx.to_le_bytes());
+        acc = poseidon_pair(&acc, &idx_bytes);
+    }
+    acc
+}
+
 /// Compute a Poseidon Merkle root from leaf, index, and siblings.
 pub fn compute_poseidon_merkle_root(
     leaf: &[u8; 32],
@@ -75,6 +96,16 @@ pub fn verify_poseidon_merkle_proof(
     root: &[u8; 32],
 ) -> bool {
     merkle::verify_proof(poseidon_pair, leaf, index, siblings, root)
+}
+
+/// Verify multiple Poseidon Merkle leaves against a single root using a multi-proof.
+/// Returns the computed root.
+pub fn verify_poseidon_multi_proof(
+    leaves: &[([u8; 32], u64)],
+    proof: &crate::types::MerkleMultiProof,
+    depth: u32,
+) -> [u8; 32] {
+    merkle::verify_multi_proof(poseidon_pair, leaves, proof, depth)
 }
 
 /// Serialize an Fr element to 32 bytes (little-endian).

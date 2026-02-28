@@ -226,7 +226,7 @@ fn parse_validator_entry(entry: &serde_json::Value) -> Result<ValidatorResponse>
     })
 }
 
-fn parse_attestation_entry(entry: &serde_json::Value) -> Result<AttestationResponse> {
+pub fn parse_attestation_entry(entry: &serde_json::Value) -> Result<AttestationResponse> {
     let data = &entry["data"];
     Ok(AttestationResponse {
         aggregation_bits: parse_hex_bitfield(entry, "aggregation_bits")?,
@@ -249,7 +249,7 @@ fn parse_attestation_entry(entry: &serde_json::Value) -> Result<AttestationRespo
     })
 }
 
-fn parse_committee_entry(entry: &serde_json::Value) -> Result<CommitteeResponse> {
+pub fn parse_committee_entry(entry: &serde_json::Value) -> Result<CommitteeResponse> {
     let validators = entry["validators"]
         .as_array()
         .context("missing validators")?

@@ -252,6 +252,26 @@ pub fn extract_validators(raw_ssz: &[u8]) -> Result<Vec<crate::beacon_api::Valid
     Ok(validators)
 }
 
+/// Extract `genesis_validators_root` (field 1, Bytes32) from raw SSZ state.
+///
+/// Field 1 starts at byte offset 8 (after genesis_time which is 8 bytes).
+pub fn extract_genesis_validators_root(raw_ssz: &[u8]) -> [u8; 32] {
+    let mut root = [0u8; 32];
+    root.copy_from_slice(&raw_ssz[8..40]);
+    root
+}
+
+/// Extract `fork.current_version` (4 bytes) from raw SSZ state.
+///
+/// Field 3 (Fork) starts at byte offset 48 (8+32+8).
+/// Fork layout: previous_version(4) + current_version(4) + epoch(8).
+/// So current_version is at offset 52.
+pub fn extract_fork_version(raw_ssz: &[u8]) -> [u8; 4] {
+    let mut version = [0u8; 4];
+    version.copy_from_slice(&raw_ssz[52..56]);
+    version
+}
+
 /// Extract slot and state_root from raw SSZ state (fields 2 and embedded in the block header).
 #[allow(dead_code)]
 pub fn extract_header(raw_ssz: &[u8]) -> Result<crate::beacon_api::HeaderResponse> {

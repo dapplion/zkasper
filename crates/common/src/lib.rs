@@ -10,12 +10,43 @@ pub mod poseidon;
 pub mod ssz;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
+pub mod recursion;
 pub mod types;
+
+/// Network-specific configuration for beacon chain parameters.
+#[derive(Debug, Clone)]
+pub struct ChainConfig {
+    pub slots_per_epoch: u64,
+    pub validators_tree_depth: u32,
+    pub poseidon_tree_depth: u32,
+    pub beacon_state_validators_field_index: u64,
+}
+
+impl ChainConfig {
+    pub const MAINNET: Self = Self {
+        slots_per_epoch: 32,
+        validators_tree_depth: 40,
+        poseidon_tree_depth: 22,
+        beacon_state_validators_field_index: 11,
+    };
+
+    pub const GNOSIS: Self = Self {
+        slots_per_epoch: 16,
+        validators_tree_depth: 40,
+        poseidon_tree_depth: 22,
+        beacon_state_validators_field_index: 11,
+    };
+}
 
 /// Beacon chain constants
 pub mod constants {
-    /// Depth of the validators data tree (capacity 2^40)
+    /// Depth of the SSZ validators data tree (capacity 2^40, per spec).
     pub const VALIDATORS_TREE_DEPTH: u32 = 40;
+
+    /// Depth of the Poseidon accumulator tree (capacity 2^22 = 4,194,304).
+    /// Independent of the SSZ tree depth — only needs to hold the actual
+    /// validator count (~2.2M as of 2025).
+    pub const POSEIDON_TREE_DEPTH: u32 = 22;
 
     /// Number of fields in a Validator container
     pub const VALIDATOR_FIELDS_COUNT: usize = 8;
