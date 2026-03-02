@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use rayon::prelude::*;
-use zkasper_common::ssz::{sha256_pair, u64_to_chunk, validator_hash_tree_root};
-use zkasper_common::types::{BlsPubkey, MerkleMultiProof, ValidatorData};
+use zkasper_common::ssz::{compute_validator_field_leaves, sha256_pair, validator_hash_tree_root};
+use zkasper_common::types::{BlsPubkey, MerkleMultiProof, ValidatorData, ValidatorSummary};
 
 use crate::beacon_api::ValidatorResponse;
 
@@ -12,9 +12,9 @@ use crate::beacon_api::ValidatorResponse;
 // Validator response → common types conversions
 // ---------------------------------------------------------------------------
 
-/// Convert a beacon API validator response into the minimal `ValidatorData`.
-pub fn validator_response_to_data(v: &ValidatorResponse) -> ValidatorData {
-    ValidatorData {
+/// Convert a beacon API validator response into a minimal `ValidatorSummary`.
+pub fn validator_response_to_summary(v: &ValidatorResponse) -> ValidatorSummary {
+    ValidatorSummary {
         pubkey: BlsPubkey(v.pubkey),
         effective_balance: v.effective_balance,
         activation_epoch: v.activation_epoch,
@@ -22,42 +22,18 @@ pub fn validator_response_to_data(v: &ValidatorResponse) -> ValidatorData {
     }
 }
 
-/// Build the 8 SSZ field leaves for a validator from the full API response.
-///
-/// SSZ Validator container field layout (8 fields):
-/// ```text
-/// leaf[0] = sha256(pubkey[0..32] || pubkey[32..48]++zeros)
-/// leaf[1] = withdrawal_credentials (32 bytes, opaque)
-/// leaf[2] = le_pad32(effective_balance)
-/// leaf[3] = le_pad32(slashed)
-/// leaf[4] = le_pad32(activation_eligibility_epoch)
-/// leaf[5] = le_pad32(activation_epoch)
-/// leaf[6] = le_pad32(exit_epoch)
-/// leaf[7] = le_pad32(withdrawable_epoch)
-/// ```
-pub fn validator_response_to_field_leaves(v: &ValidatorResponse) -> [[u8; 32]; 8] {
-    let chunks = validator_response_to_pubkey_chunks(v);
-    let pubkey_leaf = sha256_pair(&chunks[0], &chunks[1]);
-
-    [
-        pubkey_leaf,
-        v.withdrawal_credentials,
-        u64_to_chunk(v.effective_balance),
-        u64_to_chunk(if v.slashed { 1 } else { 0 }),
-        u64_to_chunk(v.activation_eligibility_epoch),
-        u64_to_chunk(v.activation_epoch),
-        u64_to_chunk(v.exit_epoch),
-        u64_to_chunk(v.withdrawable_epoch),
-    ]
-}
-
-/// Split a 48-byte pubkey into 2×32-byte SSZ chunks.
-pub fn validator_response_to_pubkey_chunks(v: &ValidatorResponse) -> [[u8; 32]; 2] {
-    let mut chunk0 = [0u8; 32];
-    let mut chunk1 = [0u8; 32];
-    chunk0.copy_from_slice(&v.pubkey[..32]);
-    chunk1[..16].copy_from_slice(&v.pubkey[32..48]);
-    [chunk0, chunk1]
+/// Convert a beacon API validator response into `ValidatorData` (all 8 SSZ fields).
+pub fn validator_response_to_data(v: &ValidatorResponse) -> ValidatorData {
+    ValidatorData {
+        pubkey: BlsPubkey(v.pubkey),
+        withdrawal_credentials: v.withdrawal_credentials,
+        effective_balance: v.effective_balance,
+        slashed: v.slashed,
+        activation_eligibility_epoch: v.activation_eligibility_epoch,
+        activation_epoch: v.activation_epoch,
+        exit_epoch: v.exit_epoch,
+        withdrawable_epoch: v.withdrawable_epoch,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +196,10 @@ fn get_node_hash(
 pub fn build_validator_roots(validators: &[ValidatorResponse]) -> Vec<[u8; 32]> {
     validators
         .par_iter()
-        .map(|v| validator_hash_tree_root(&validator_response_to_field_leaves(v)))
+        .map(|v| {
+            let data = validator_response_to_data(v);
+            validator_hash_tree_root(&compute_validator_field_leaves(&data))
+        })
         .collect()
 }
 

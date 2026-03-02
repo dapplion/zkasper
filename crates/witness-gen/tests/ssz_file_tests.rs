@@ -360,9 +360,8 @@ async fn bench_epoch_diff_guest_ops() {
     use zkasper_common::op_counter;
     use zkasper_common::poseidon::{compute_poseidon_merkle_root, poseidon_leaf};
     use zkasper_common::ssz::{
-        compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root,
-        validator_hash_tree_root_pair, verify_field_leaves, verify_field_leaves_no_pubkey_hash,
-        verify_ssz_multi_proof,
+        compute_ssz_merkle_root, compute_validator_field_leaves, list_hash_tree_root,
+        validator_hash_tree_root, validator_hash_tree_root_pair, verify_ssz_multi_proof,
     };
 
     init_tracing();
@@ -400,30 +399,29 @@ async fn bench_epoch_diff_guest_ops() {
     eprintln!("TOTAL:              {total}");
 
     // --- Per-phase breakdown: replay the guest logic manually ---
-    // Phase 1: verify_field_leaves (old + new)
-    // Old validators use no_pubkey_hash variant (saves 1 SHA-256 per non-new mutation)
+    // Phase 1: compute_validator_field_leaves (old + new)
     op_counter::reset();
     let s0 = op_counter::snapshot();
     for m in &diff_witness.mutations {
-        if m.is_new {
-            verify_field_leaves(&m.new_data, &m.new_field_leaves, &m.new_pubkey_chunks);
-        } else {
-            verify_field_leaves(&m.new_data, &m.new_field_leaves, &m.new_pubkey_chunks);
-            verify_field_leaves_no_pubkey_hash(&m.old_data, &m.old_field_leaves, &m.old_pubkey_chunks);
+        compute_validator_field_leaves(&m.new_data);
+        if !m.is_new {
+            compute_validator_field_leaves(&m.old_data);
         }
     }
     let phase_field_leaves = op_counter::snapshot().delta(&s0);
-    eprintln!("verify_field_leaves: {phase_field_leaves}");
+    eprintln!("compute_field_leaves: {phase_field_leaves}");
 
     // Phase 2: validator_hash_tree_root (old + new)
     // Uses paired HTR for non-new mutations (shares work for identical subtrees)
     op_counter::reset();
     let s0 = op_counter::snapshot();
     for m in &diff_witness.mutations {
+        let new_fl = compute_validator_field_leaves(&m.new_data);
         if m.is_new {
-            validator_hash_tree_root(&m.new_field_leaves);
+            validator_hash_tree_root(&new_fl);
         } else {
-            validator_hash_tree_root_pair(&m.old_field_leaves, &m.new_field_leaves);
+            let old_fl = compute_validator_field_leaves(&m.old_data);
+            validator_hash_tree_root_pair(&old_fl, &new_fl);
         }
     }
     let phase_htr = op_counter::snapshot().delta(&s0);
@@ -435,11 +433,13 @@ async fn bench_epoch_diff_guest_ops() {
     let mut new_leaves: Vec<([u8; 32], u64)> = Vec::with_capacity(diff_witness.mutations.len());
     for m in &diff_witness.mutations {
         let idx = m.validator_index;
+        let new_fl = compute_validator_field_leaves(&m.new_data);
         if m.is_new {
             old_leaves.push(([0u8; 32], idx));
-            new_leaves.push((validator_hash_tree_root(&m.new_field_leaves), idx));
+            new_leaves.push((validator_hash_tree_root(&new_fl), idx));
         } else {
-            let (old_root, new_root) = validator_hash_tree_root_pair(&m.old_field_leaves, &m.new_field_leaves);
+            let old_fl = compute_validator_field_leaves(&m.old_data);
+            let (old_root, new_root) = validator_hash_tree_root_pair(&old_fl, &new_fl);
             old_leaves.push((old_root, idx));
             new_leaves.push((new_root, idx));
         }

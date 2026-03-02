@@ -116,11 +116,9 @@ async fn main() -> Result<()> {
             // Serialize witness
             let output_path = format!("{}/bootstrap_input.bin", cli.output_dir);
             let bytes = bincode::serialize(&witness).context("serialize bootstrap witness")?;
-            std::fs::write(&output_path, bytes).context("write bootstrap witness")?;
-            eprintln!(
-                "wrote {output_path} ({} bytes)",
-                std::fs::metadata(&output_path)?.len()
-            );
+            std::fs::write(&output_path, &bytes).context("write bootstrap witness")?;
+            eprintln!("wrote {output_path}");
+            log_bootstrap_witness_size(&witness, bytes.len());
         }
 
         Command::EpochDiff { slot1, slot2 } => {
@@ -269,6 +267,27 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn log_bootstrap_witness_size(witness: &zkasper_common::types::BootstrapWitness, total: usize) {
+    let sz_state_root = bincode::serialized_size(&witness.state_root).unwrap_or(0) as usize;
+    let sz_epoch = bincode::serialized_size(&witness.epoch).unwrap_or(0) as usize;
+    let sz_validators = bincode::serialized_size(&witness.validators).unwrap_or(0) as usize;
+    let sz_siblings = bincode::serialized_size(&witness.state_to_validators_siblings).unwrap_or(0) as usize;
+    let sz_list_len = bincode::serialized_size(&witness.validators_list_length).unwrap_or(0) as usize;
+
+    let mb = |b: usize| b as f64 / (1024.0 * 1024.0);
+    let pct = |b: usize| 100.0 * b as f64 / total as f64;
+    let n = witness.validators.len().max(1);
+    let s = witness.state_to_validators_siblings.len();
+
+    eprintln!("bootstrap witness size breakdown ({total} bytes, {:.1} MB):", mb(total));
+    eprintln!("  validators count:         {}", witness.validators.len());
+    eprintln!("  state_root:              {:>12} bytes ({:>6.1} MB, {:>5.1}%)", sz_state_root, mb(sz_state_root), pct(sz_state_root));
+    eprintln!("  epoch:                   {:>12} bytes ({:>6.1} MB, {:>5.1}%)", sz_epoch, mb(sz_epoch), pct(sz_epoch));
+    eprintln!("  validators:              {:>12} bytes ({:>6.1} MB, {:>5.1}%) [{} B/val]", sz_validators, mb(sz_validators), pct(sz_validators), sz_validators / n);
+    eprintln!("  state_to_val_siblings:   {:>12} bytes ({:>6.1} MB, {:>5.1}%) [{s} siblings]", sz_siblings, mb(sz_siblings), pct(sz_siblings));
+    eprintln!("  validators_list_length:  {:>12} bytes ({:>6.1} MB, {:>5.1}%)", sz_list_len, mb(sz_list_len), pct(sz_list_len));
 }
 
 fn parse_hex_bytes32(s: &str) -> Result<[u8; 32]> {

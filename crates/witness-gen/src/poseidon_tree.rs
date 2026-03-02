@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 use zkasper_common::poseidon::{poseidon_leaf, poseidon_pair};
-use zkasper_common::types::ValidatorData;
+use zkasper_common::types::ValidatorSummary;
 
 /// Sparse Poseidon Merkle tree stored level-by-level.
 ///
@@ -50,7 +50,7 @@ impl PoseidonTree {
     ///
     /// Only allocates the dense portion (2^ceil(log2(n)) leaves).
     /// The full root at `depth` is computed via zero_hash chaining.
-    pub fn build(validators: &[ValidatorData], epoch: u64, depth: u32) -> Self {
+    pub fn build(validators: &[ValidatorSummary], epoch: u64, depth: u32) -> Self {
         let zero_hashes = compute_poseidon_zero_hashes(depth);
 
         let dense_depth = ceil_log2(validators.len()).max(1).min(depth);
@@ -69,6 +69,39 @@ impl PoseidonTree {
         // Build levels bottom-up (0..dense_depth), parallelizing large levels
         let mut levels = Vec::with_capacity((dense_depth + 1) as usize);
         levels.push(leaves);
+
+        for d in 0..dense_depth as usize {
+            let prev = &levels[d];
+            let parents: Vec<[u8; 32]> = prev
+                .par_chunks_exact(2)
+                .map(|pair| poseidon_pair(&pair[0], &pair[1]))
+                .collect();
+            levels.push(parents);
+        }
+
+        Self {
+            depth,
+            dense_depth,
+            levels,
+            zero_hashes,
+        }
+    }
+
+    /// Build the tree from pre-computed Poseidon leaves.
+    ///
+    /// Same as `build()` but skips the `poseidon_leaf` computation step.
+    pub fn build_from_leaves(leaves: &[[u8; 32]], depth: u32) -> Self {
+        let zero_hashes = compute_poseidon_zero_hashes(depth);
+
+        let dense_depth = ceil_log2(leaves.len()).max(1).min(depth);
+        let dense_capacity = 1usize << dense_depth;
+
+        let mut padded_leaves = Vec::with_capacity(dense_capacity);
+        padded_leaves.extend_from_slice(leaves);
+        padded_leaves.resize(dense_capacity, [0u8; 32]);
+
+        let mut levels = Vec::with_capacity((dense_depth + 1) as usize);
+        levels.push(padded_leaves);
 
         for d in 0..dense_depth as usize {
             let prev = &levels[d];
@@ -206,8 +239,8 @@ mod tests {
     use super::*;
     use zkasper_common::types::BlsPubkey;
 
-    fn dummy_validator(i: u8) -> ValidatorData {
-        ValidatorData {
+    fn dummy_validator(i: u8) -> ValidatorSummary {
+        ValidatorSummary {
             pubkey: BlsPubkey([i; 48]),
             effective_balance: 32_000_000_000,
             activation_epoch: 0,

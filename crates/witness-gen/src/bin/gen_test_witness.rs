@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use zkasper_common::bls::{compute_domain, compute_signing_root, DOMAIN_BEACON_ATTESTER};
-use zkasper_common::constants::FAR_FUTURE_EPOCH;
 use zkasper_common::poseidon::{accumulator_commitment, counted_validators_commitment};
 use zkasper_common::ssz::attestation_data_root;
 use zkasper_common::test_utils::make_validator;
@@ -33,14 +32,10 @@ fn validator_data_to_response(data: &ValidatorData, index: u64) -> ValidatorResp
         effective_balance: data.effective_balance,
         activation_epoch: data.activation_epoch,
         exit_epoch: data.exit_epoch,
-        withdrawal_credentials: {
-            let mut wc = [0u8; 32];
-            wc[0] = 0x01;
-            wc
-        },
-        slashed: false,
-        activation_eligibility_epoch: 0,
-        withdrawable_epoch: FAR_FUTURE_EPOCH,
+        withdrawal_credentials: data.withdrawal_credentials,
+        slashed: data.slashed,
+        activation_eligibility_epoch: data.activation_eligibility_epoch,
+        withdrawable_epoch: data.withdrawable_epoch,
     }
 }
 
@@ -248,16 +243,30 @@ fn build_slot_test_data() -> SlotTestData {
     let keys = generate_test_keys(4);
     let validators: Vec<ValidatorData> = keys
         .iter()
-        .map(|(_, pk)| ValidatorData {
-            pubkey: BlsPubkey(*pk),
-            effective_balance: balance_gwei,
-            activation_epoch: 0,
-            exit_epoch: u64::MAX,
+        .map(|(_, pk)| {
+            let mut wc = [0u8; 32];
+            wc[0] = 0x01;
+            ValidatorData {
+                pubkey: BlsPubkey(*pk),
+                withdrawal_credentials: wc,
+                effective_balance: balance_gwei,
+                slashed: false,
+                activation_eligibility_epoch: 0,
+                activation_epoch: 0,
+                exit_epoch: u64::MAX,
+                withdrawable_epoch: u64::MAX,
+            }
         })
         .collect();
 
     let total_active_balance = 4 * balance_gwei;
-    let tree = PoseidonTree::build(&validators, epoch, CONFIG.poseidon_tree_depth);
+    let poseidon_leaves: Vec<[u8; 32]> = validators
+        .iter()
+        .map(|v| {
+            zkasper_common::poseidon::poseidon_leaf(&v.pubkey.0, v.active_effective_balance(epoch))
+        })
+        .collect();
+    let tree = PoseidonTree::build_from_leaves(&poseidon_leaves, CONFIG.poseidon_tree_depth);
     let poseidon_root = tree.root();
     let commitment = accumulator_commitment(&poseidon_root, total_active_balance);
     let signing_domain = test_signing_domain();

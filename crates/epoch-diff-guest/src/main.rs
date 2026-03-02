@@ -51,7 +51,9 @@ fn write_bytes32_output(offset: usize, bytes: &[u8; 32]) {
 mod tests {
     use zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX;
     use zkasper_common::poseidon::poseidon_leaf;
-    use zkasper_common::ssz::{list_hash_tree_root, sha256_pair, validator_hash_tree_root};
+    use zkasper_common::ssz::{
+        compute_validator_field_leaves, list_hash_tree_root, sha256_pair, validator_hash_tree_root,
+    };
     use zkasper_common::test_utils::*;
     use zkasper_common::types::*;
     use zkasper_epoch_diff_guest::verify_epoch_diff_with_depth;
@@ -99,14 +101,14 @@ mod tests {
 
         let old_roots: Vec<_> = [&v0, &v1_old, &v2, &v3]
             .iter()
-            .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
+            .map(|v| validator_hash_tree_root(&compute_validator_field_leaves(v)))
             .collect();
         let (old_data_root, ssz_multi_proof_1) =
             build_ssz_tree_multi_proof(&old_roots, ssz_depth, &[1]);
 
         let new_roots: Vec<_> = [&v0, &v1_new, &v2, &v3]
             .iter()
-            .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
+            .map(|v| validator_hash_tree_root(&compute_validator_field_leaves(v)))
             .collect();
         let (new_data_root, ssz_multi_proof_2) =
             build_ssz_tree_multi_proof(&new_roots, ssz_depth, &[1]);
@@ -122,7 +124,8 @@ mod tests {
             .iter()
             .map(|v| poseidon_leaf(&v.pubkey.0, v.active_effective_balance(epoch_new)))
             .collect();
-        let (expected_new_poseidon_root, _) = build_poseidon_tree(&new_poseidon_leaves, poseidon_depth);
+        let (expected_new_poseidon_root, _) =
+            build_poseidon_tree(&new_poseidon_leaves, poseidon_depth);
 
         let num_validators = 4u64;
         let (state_root_1, state_siblings_1) = make_state_proof(&old_data_root, num_validators);
@@ -131,12 +134,8 @@ mod tests {
         let mutation = ValidatorMutation {
             validator_index: 1,
             is_new: false,
-            old_data: v1_old.clone(),
-            new_data: v1_new.clone(),
-            old_field_leaves: make_field_leaves(&v1_old),
-            new_field_leaves: make_field_leaves(&v1_new),
-            old_pubkey_chunks: make_pubkey_chunks(&v1_old),
-            new_pubkey_chunks: make_pubkey_chunks(&v1_new),
+            old_data: v1_old,
+            new_data: v1_new,
             poseidon_siblings: poseidon_siblings[1].clone(),
         };
 
@@ -159,7 +158,7 @@ mod tests {
         };
 
         let (commitment, new_poseidon_root, new_total_balance) =
-            zkasper_epoch_diff_guest::verify_epoch_diff_with_depth(&witness, ssz_depth, poseidon_depth);
+            verify_epoch_diff_with_depth(&witness, ssz_depth, poseidon_depth);
 
         assert_eq!(new_poseidon_root, expected_new_poseidon_root);
         let expected_total = 3 * 32_000_000_000 + 16_000_000_000;

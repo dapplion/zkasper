@@ -4,53 +4,41 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::poseidon::poseidon_pair;
-use crate::ssz::{sha256_pair, u64_to_chunk};
+use crate::ssz::sha256_pair;
 use crate::types::*;
 
-/// Create a dummy validator with deterministic data.
+/// Create a dummy validator with all 8 SSZ fields and deterministic data.
 pub fn make_validator(index: u8, balance_eth: u64) -> ValidatorData {
     let mut pubkey = [0u8; 48];
     pubkey[0] = index;
     pubkey[1] = index.wrapping_mul(7);
+
+    let mut withdrawal_creds = [0u8; 32];
+    withdrawal_creds[0] = 0x01;
+
     ValidatorData {
+        pubkey: BlsPubkey(pubkey),
+        withdrawal_credentials: withdrawal_creds,
+        effective_balance: balance_eth * 1_000_000_000,
+        slashed: false,
+        activation_eligibility_epoch: 0,
+        activation_epoch: 0,
+        exit_epoch: u64::MAX,
+        withdrawable_epoch: u64::MAX,
+    }
+}
+
+/// Create a minimal validator summary with deterministic data.
+pub fn make_validator_summary(index: u8, balance_eth: u64) -> ValidatorSummary {
+    let mut pubkey = [0u8; 48];
+    pubkey[0] = index;
+    pubkey[1] = index.wrapping_mul(7);
+    ValidatorSummary {
         pubkey: BlsPubkey(pubkey),
         effective_balance: balance_eth * 1_000_000_000,
         activation_epoch: 0,
         exit_epoch: u64::MAX,
     }
-}
-
-/// Build the 8 SSZ field leaves for a validator.
-/// Leaves 1, 3, 4, 7 (opaque fields) are filled with deterministic junk.
-pub fn make_field_leaves(data: &ValidatorData) -> [[u8; 32]; 8] {
-    let pubkey_chunks = make_pubkey_chunks(data);
-    let pubkey_leaf = sha256_pair(&pubkey_chunks[0], &pubkey_chunks[1]);
-
-    let mut withdrawal_creds = [0u8; 32];
-    withdrawal_creds[0] = 0x01; // ETH1 withdrawal prefix
-    let slashed = [0u8; 32]; // not slashed
-    let activation_eligibility = u64_to_chunk(0);
-    let withdrawable_epoch = u64_to_chunk(u64::MAX);
-
-    [
-        pubkey_leaf,
-        withdrawal_creds,
-        u64_to_chunk(data.effective_balance),
-        slashed,
-        activation_eligibility,
-        u64_to_chunk(data.activation_epoch),
-        u64_to_chunk(data.exit_epoch),
-        withdrawable_epoch,
-    ]
-}
-
-/// Split pubkey into 2x32-byte SSZ chunks.
-pub fn make_pubkey_chunks(data: &ValidatorData) -> [[u8; 32]; 2] {
-    let mut chunk0 = [0u8; 32];
-    let mut chunk1 = [0u8; 32];
-    chunk0.copy_from_slice(&data.pubkey.0[..32]);
-    chunk1[..16].copy_from_slice(&data.pubkey.0[32..48]);
-    [chunk0, chunk1]
 }
 
 /// Build a sparse Merkle tree (SHA-256) from validator roots and return

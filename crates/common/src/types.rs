@@ -20,14 +20,51 @@ pub struct BlsPubkey(#[serde(with = "BigArray")] pub [u8; 48]);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlsSignature(#[serde(with = "BigArray")] pub [u8; 96]);
 
-/// Minimal validator data — only the fields needed for zkasper.
+/// Minimal validator summary — pubkey + the fields needed for Poseidon leaves.
+///
+/// Used by the attestation pipeline and Poseidon tree construction from
+/// pre-existing data. For witness types that need all 8 SSZ fields, use
+/// [`ValidatorData`] instead.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ValidatorData {
+pub struct ValidatorSummary {
     pub pubkey: BlsPubkey,
     /// Effective balance in Gwei.
     pub effective_balance: u64,
     pub activation_epoch: u64,
     pub exit_epoch: u64,
+}
+
+impl ValidatorSummary {
+    /// Whether this validator is active at the given epoch.
+    pub fn is_active(&self, epoch: u64) -> bool {
+        self.activation_epoch <= epoch && epoch < self.exit_epoch
+    }
+
+    /// Returns `effective_balance` if active, else 0.
+    pub fn active_effective_balance(&self, epoch: u64) -> u64 {
+        if self.is_active(epoch) {
+            self.effective_balance
+        } else {
+            0
+        }
+    }
+}
+
+/// All 8 SSZ Validator container fields.
+///
+/// Used by bootstrap and epoch-diff witnesses so the guest can compute
+/// SSZ field leaves directly, eliminating separate field_chunks/pubkey_chunks vectors.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorData {
+    pub pubkey: BlsPubkey,
+    pub withdrawal_credentials: [u8; 32],
+    /// Effective balance in Gwei.
+    pub effective_balance: u64,
+    pub slashed: bool,
+    pub activation_eligibility_epoch: u64,
+    pub activation_epoch: u64,
+    pub exit_epoch: u64,
+    pub withdrawable_epoch: u64,
 }
 
 impl ValidatorData {
@@ -66,12 +103,6 @@ pub struct ValidatorMutation {
     pub is_new: bool,
     pub old_data: ValidatorData,
     pub new_data: ValidatorData,
-    /// 8 field-level SSZ hash-tree leaves for the Validator container.
-    pub old_field_leaves: [[u8; 32]; 8],
-    pub new_field_leaves: [[u8; 32]; 8],
-    /// Raw pubkey split into 2x32-byte SSZ chunks (to verify field_leaves[0]).
-    pub old_pubkey_chunks: [[u8; 32]; 2],
-    pub new_pubkey_chunks: [[u8; 32]; 2],
     /// Poseidon Merkle siblings (depth = POSEIDON_TREE_DEPTH).
     pub poseidon_siblings: Vec<[u8; 32]>,
 }
@@ -252,8 +283,4 @@ pub struct BootstrapWitness {
     /// SSZ proof from state_root to the validators data tree root.
     pub state_to_validators_siblings: Vec<[u8; 32]>,
     pub validators_list_length: u64,
-    /// Per-validator: the 8 SSZ field-level hash-tree leaves.
-    pub validator_field_chunks: Vec<[[u8; 32]; 8]>,
-    /// Per-validator: raw pubkey split into 2x32-byte SSZ chunks.
-    pub validator_pubkey_chunks: Vec<[[u8; 32]; 2]>,
 }
