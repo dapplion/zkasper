@@ -1,7 +1,6 @@
 use sha2::{Digest, Sha256};
 
 use crate::merkle;
-use crate::types::ValidatorData;
 
 /// SHA-256 hash of two concatenated 32-byte inputs.
 pub fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -143,121 +142,41 @@ pub fn u64_to_chunk(val: u64) -> [u8; 32] {
     chunk
 }
 
-/// Verify that the SSZ field leaves are consistent with the claimed `ValidatorData`.
+/// Compute the 8 SSZ field-level hash-tree leaves from full validator data.
 ///
-/// Checks:
-/// - `field_leaves[0]` = `sha256(pubkey_chunks[0] || pubkey_chunks[1])`
-/// - `pubkey_chunks` encode the raw pubkey bytes
-/// - `field_leaves[2]` encodes `effective_balance`
-/// - `field_leaves[5]` encodes `activation_epoch`
-/// - `field_leaves[6]` encodes `exit_epoch`
-///
-/// Leaves 1, 3, 4, 7 are opaque (withdrawal_credentials, slashed,
-/// activation_eligibility_epoch, withdrawable_epoch).
-///
-/// For a cheaper variant that skips the pubkey SHA-256 hash (when pubkey is
-/// known to match another already-verified set), use [`verify_field_leaves_no_pubkey_hash`].
-pub fn verify_field_leaves(
-    data: &ValidatorData,
-    field_leaves: &[[u8; 32]; 8],
-    pubkey_chunks: &[[u8; 32]; 2],
-) {
-    // pubkey: field_leaves[0] = sha256(chunk0 || chunk1)
-    let computed_pubkey_leaf = sha256_pair(&pubkey_chunks[0], &pubkey_chunks[1]);
-    assert_eq!(
-        field_leaves[0], computed_pubkey_leaf,
-        "pubkey leaf mismatch"
-    );
+/// SSZ Validator container field layout:
+/// - leaf[0] = sha256(pubkey[0..32] || pubkey[32..48]++zeros)
+/// - leaf[1] = withdrawal_credentials
+/// - leaf[2] = le_pad32(effective_balance)
+/// - leaf[3] = le_pad32(slashed)
+/// - leaf[4] = le_pad32(activation_eligibility_epoch)
+/// - leaf[5] = le_pad32(activation_epoch)
+/// - leaf[6] = le_pad32(exit_epoch)
+/// - leaf[7] = le_pad32(withdrawable_epoch)
+pub fn compute_validator_field_leaves(v: &crate::types::ValidatorData) -> [[u8; 32]; 8] {
+    let mut chunk0 = [0u8; 32];
+    let mut chunk1 = [0u8; 32];
+    chunk0.copy_from_slice(&v.pubkey.0[..32]);
+    chunk1[..16].copy_from_slice(&v.pubkey.0[32..48]);
 
-    // pubkey raw bytes match the chunks
-    assert_eq!(
-        &pubkey_chunks[0][..32],
-        &data.pubkey.0[..32],
-        "pubkey chunk 0 mismatch"
-    );
-    assert_eq!(
-        &pubkey_chunks[1][..16],
-        &data.pubkey.0[32..48],
-        "pubkey chunk 1 mismatch"
-    );
-    // remaining 16 bytes of chunk 1 must be zero
-    assert_eq!(
-        &pubkey_chunks[1][16..],
-        &[0u8; 16],
-        "pubkey chunk 1 padding not zero"
-    );
+    let pubkey_leaf = sha256_pair(&chunk0, &chunk1);
 
-    // effective_balance
-    assert_eq!(
-        field_leaves[2],
-        u64_to_chunk(data.effective_balance),
-        "effective_balance leaf mismatch"
-    );
-
-    // activation_epoch
-    assert_eq!(
-        field_leaves[5],
-        u64_to_chunk(data.activation_epoch),
-        "activation_epoch leaf mismatch"
-    );
-
-    // exit_epoch
-    assert_eq!(
-        field_leaves[6],
-        u64_to_chunk(data.exit_epoch),
-        "exit_epoch leaf mismatch"
-    );
-}
-
-/// Like [`verify_field_leaves`] but skips the pubkey SHA-256 hash.
-///
-/// Use when the pubkey leaf has already been verified elsewhere (e.g. the
-/// new validator's field_leaves were verified with [`verify_field_leaves`]
-/// and we know old_field_leaves[0] == new_field_leaves[0] because pubkeys
-/// don't change for existing validators).
-pub fn verify_field_leaves_no_pubkey_hash(
-    data: &ValidatorData,
-    field_leaves: &[[u8; 32]; 8],
-    pubkey_chunks: &[[u8; 32]; 2],
-) {
-    // pubkey raw bytes match the chunks (no SHA-256 needed)
-    assert_eq!(
-        &pubkey_chunks[0][..32],
-        &data.pubkey.0[..32],
-        "pubkey chunk 0 mismatch"
-    );
-    assert_eq!(
-        &pubkey_chunks[1][..16],
-        &data.pubkey.0[32..48],
-        "pubkey chunk 1 mismatch"
-    );
-    assert_eq!(
-        &pubkey_chunks[1][16..],
-        &[0u8; 16],
-        "pubkey chunk 1 padding not zero"
-    );
-
-    assert_eq!(
-        field_leaves[2],
-        u64_to_chunk(data.effective_balance),
-        "effective_balance leaf mismatch"
-    );
-    assert_eq!(
-        field_leaves[5],
-        u64_to_chunk(data.activation_epoch),
-        "activation_epoch leaf mismatch"
-    );
-    assert_eq!(
-        field_leaves[6],
-        u64_to_chunk(data.exit_epoch),
-        "exit_epoch leaf mismatch"
-    );
+    [
+        pubkey_leaf,
+        v.withdrawal_credentials,
+        u64_to_chunk(v.effective_balance),
+        u64_to_chunk(if v.slashed { 1 } else { 0 }),
+        u64_to_chunk(v.activation_eligibility_epoch),
+        u64_to_chunk(v.activation_epoch),
+        u64_to_chunk(v.exit_epoch),
+        u64_to_chunk(v.withdrawable_epoch),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_field_leaves, make_pubkey_chunks, make_validator};
+    use crate::test_utils::make_validator;
 
     #[test]
     fn test_sha256_pair() {
@@ -302,7 +221,7 @@ mod tests {
     #[test]
     fn test_validator_hash_tree_root_deterministic() {
         let v = make_validator(1, 32);
-        let leaves = make_field_leaves(&v);
+        let leaves = compute_validator_field_leaves(&v);
         let a = validator_hash_tree_root(&leaves);
         let b = validator_hash_tree_root(&leaves);
         assert_eq!(a, b);
@@ -312,40 +231,9 @@ mod tests {
     fn test_validator_hash_tree_root_changes_with_balance() {
         let v1 = make_validator(1, 32);
         let v2 = make_validator(1, 16);
-        let a = validator_hash_tree_root(&make_field_leaves(&v1));
-        let b = validator_hash_tree_root(&make_field_leaves(&v2));
+        let a = validator_hash_tree_root(&compute_validator_field_leaves(&v1));
+        let b = validator_hash_tree_root(&compute_validator_field_leaves(&v2));
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn test_verify_field_leaves_valid() {
-        let v = make_validator(5, 32);
-        let leaves = make_field_leaves(&v);
-        let chunks = make_pubkey_chunks(&v);
-        // Should not panic
-        verify_field_leaves(&v, &leaves, &chunks);
-    }
-
-    #[test]
-    #[should_panic(expected = "effective_balance leaf mismatch")]
-    fn test_verify_field_leaves_wrong_balance() {
-        let v = make_validator(5, 32);
-        let mut leaves = make_field_leaves(&v);
-        // Tamper with the balance leaf
-        leaves[2] = u64_to_chunk(16_000_000_000);
-        let chunks = make_pubkey_chunks(&v);
-        verify_field_leaves(&v, &leaves, &chunks);
-    }
-
-    #[test]
-    #[should_panic(expected = "pubkey leaf mismatch")]
-    fn test_verify_field_leaves_wrong_pubkey() {
-        let v = make_validator(5, 32);
-        let leaves = make_field_leaves(&v);
-        let mut chunks = make_pubkey_chunks(&v);
-        // Tamper with pubkey chunk
-        chunks[0][0] = 0xFF;
-        verify_field_leaves(&v, &leaves, &chunks);
     }
 
     #[test]
@@ -357,7 +245,7 @@ mod tests {
 
         let roots: Vec<_> = [&v0, &v1, &v2, &v3]
             .iter()
-            .map(|v| validator_hash_tree_root(&make_field_leaves(v)))
+            .map(|v| validator_hash_tree_root(&compute_validator_field_leaves(v)))
             .collect();
 
         let (tree_root, siblings) = crate::test_utils::build_ssz_tree(&roots, 2);

@@ -2,7 +2,8 @@
 
 use zkasper_common::poseidon::{accumulator_commitment, poseidon_leaf, poseidon_pair};
 use zkasper_common::ssz::{
-    compute_ssz_merkle_root, list_hash_tree_root, validator_hash_tree_root, verify_field_leaves,
+    compute_ssz_merkle_root, compute_validator_field_leaves, list_hash_tree_root,
+    validator_hash_tree_root,
 };
 use zkasper_common::types::BootstrapWitness;
 
@@ -27,13 +28,8 @@ pub fn verify_bootstrap_with_depth(
     let mut poseidon_leaves = Vec::with_capacity(num_validators);
 
     for i in 0..num_validators {
-        verify_field_leaves(
-            &witness.validators[i],
-            &witness.validator_field_chunks[i],
-            &witness.validator_pubkey_chunks[i],
-        );
-
-        let root = validator_hash_tree_root(&witness.validator_field_chunks[i]);
+        let field_leaves = compute_validator_field_leaves(&witness.validators[i]);
+        let root = validator_hash_tree_root(&field_leaves);
         validator_roots.push(root);
 
         let active_balance = witness.validators[i].active_effective_balance(witness.epoch);

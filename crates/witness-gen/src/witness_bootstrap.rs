@@ -12,7 +12,6 @@ use crate::poseidon_tree::PoseidonTree;
 use crate::ssz_state;
 use crate::state_diff::{
     build_validator_roots, make_state_proof, validator_response_to_data,
-    validator_response_to_field_leaves, validator_response_to_pubkey_chunks,
 };
 use crate::epoch_state::EpochState;
 
@@ -40,7 +39,7 @@ pub async fn build(
     let epoch = header.slot / config.slots_per_epoch;
 
     // Fetch all validators at this state
-    let validators = {
+    let validators: Vec<crate::beacon_api::ValidatorResponse> = {
         let _span = info_span!("fetch_validators").entered();
         let v = api
             .get_validators(&slot_str)
@@ -51,19 +50,13 @@ pub async fn build(
     };
     let num_validators = validators.len() as u64;
 
-    // Convert to common types + SSZ chunks
-    let (validator_data, field_chunks, pubkey_chunks) = {
+    // Convert to full validator data
+    let validator_data = {
         let _span = info_span!("convert").entered();
-        let data: Vec<_> = validators.par_iter().map(validator_response_to_data).collect();
-        let fields: Vec<_> = validators
+        validators
             .par_iter()
-            .map(validator_response_to_field_leaves)
-            .collect();
-        let pubkeys: Vec<_> = validators
-            .par_iter()
-            .map(validator_response_to_pubkey_chunks)
-            .collect();
-        (data, fields, pubkeys)
+            .map(validator_response_to_data)
+            .collect::<Vec<_>>()
     };
 
     // Build SSZ data tree root
@@ -104,17 +97,22 @@ pub async fn build(
         }
     };
 
-    // Build Poseidon tree
-    let tree = {
+    // Build Poseidon tree from pre-computed leaves
+    let (tree, total_active_balance) = {
         let _span = info_span!("poseidon_tree").entered();
-        PoseidonTree::build(&validator_data, epoch, poseidon_depth)
+        let poseidon_leaves: Vec<[u8; 32]> = validator_data
+            .par_iter()
+            .map(|v| {
+                let active_balance = v.active_effective_balance(epoch);
+                zkasper_common::poseidon::poseidon_leaf(&v.pubkey.0, active_balance)
+            })
+            .collect();
+        let total: u64 = validator_data
+            .iter()
+            .map(|v| v.active_effective_balance(epoch))
+            .sum();
+        (PoseidonTree::build_from_leaves(&poseidon_leaves, poseidon_depth), total)
     };
-
-    // Compute total active balance
-    let total_active_balance: u64 = validator_data
-        .iter()
-        .map(|v| v.active_effective_balance(epoch))
-        .sum();
 
     info!(num_validators, total_active_balance, "bootstrap complete");
 
@@ -133,8 +131,6 @@ pub async fn build(
         validators: validator_data,
         state_to_validators_siblings: state_siblings,
         validators_list_length: num_validators,
-        validator_field_chunks: field_chunks,
-        validator_pubkey_chunks: pubkey_chunks,
     };
 
     Ok((witness, tree, epoch_state, total_active_balance, num_validators))

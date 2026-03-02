@@ -5,7 +5,7 @@ use tracing::{info, info_span};
 
 use zkasper_common::ChainConfig;
 use zkasper_common::poseidon::poseidon_leaf;
-use zkasper_common::ssz::validator_hash_tree_root;
+use zkasper_common::ssz::{compute_validator_field_leaves, validator_hash_tree_root};
 use zkasper_common::types::{BlsPubkey, EpochDiffWitness, ValidatorData, ValidatorMutation};
 
 use crate::beacon_api::BeaconApi;
@@ -13,7 +13,6 @@ use crate::poseidon_tree::PoseidonTree;
 use crate::ssz_state;
 use crate::state_diff::{
     build_validators_ssz_tree, find_mutations, make_state_proof, validator_response_to_data,
-    validator_response_to_field_leaves, validator_response_to_pubkey_chunks,
 };
 use crate::epoch_state::EpochState;
 
@@ -90,7 +89,8 @@ pub async fn build(
         new_roots.resize(validators_2.len(), [0u8; 32]);
         for &idx in &mutation_indices {
             let v = &validators_2[idx as usize];
-            let leaves = validator_response_to_field_leaves(v);
+            let full = validator_response_to_data(v);
+            let leaves = compute_validator_field_leaves(&full);
             new_roots[idx as usize] = validator_hash_tree_root(&leaves);
         }
 
@@ -166,9 +166,13 @@ pub async fn build(
             if is_new {
                 let zero_data = ValidatorData {
                     pubkey: BlsPubkey([0u8; 48]),
+                    withdrawal_credentials: [0u8; 32],
                     effective_balance: 0,
+                    slashed: false,
+                    activation_eligibility_epoch: 0,
                     activation_epoch: 0,
                     exit_epoch: 0,
+                    withdrawable_epoch: 0,
                 };
 
                 mutations.push(ValidatorMutation {
@@ -176,10 +180,6 @@ pub async fn build(
                     is_new: true,
                     old_data: zero_data,
                     new_data,
-                    old_field_leaves: [[0u8; 32]; 8],
-                    new_field_leaves: validator_response_to_field_leaves(new_v),
-                    old_pubkey_chunks: [[0u8; 32]; 2],
-                    new_pubkey_chunks: validator_response_to_pubkey_chunks(new_v),
                     poseidon_siblings,
                 });
             } else {
@@ -191,10 +191,6 @@ pub async fn build(
                     is_new: false,
                     old_data,
                     new_data,
-                    old_field_leaves: validator_response_to_field_leaves(old_v),
-                    new_field_leaves: validator_response_to_field_leaves(new_v),
-                    old_pubkey_chunks: validator_response_to_pubkey_chunks(old_v),
-                    new_pubkey_chunks: validator_response_to_pubkey_chunks(new_v),
                     poseidon_siblings,
                 });
             }

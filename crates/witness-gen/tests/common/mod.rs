@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use zkasper_common::constants::FAR_FUTURE_EPOCH;
 use zkasper_common::types::ValidatorData;
+use zkasper_common::types::ValidatorSummary;
 
 use zkasper_witness_gen::beacon_api::{
     AttestationResponse, BeaconApi, CommitteeResponse, HeaderResponse, ValidatorResponse,
@@ -70,8 +71,23 @@ impl BeaconApi for MockBeaconApi {
     }
 }
 
-/// Convert a ValidatorData (test_utils format) to a ValidatorResponse (API format).
+/// Convert a ValidatorData (all 8 SSZ fields) to a ValidatorResponse (API format).
 pub fn validator_data_to_response(data: &ValidatorData, index: u64) -> ValidatorResponse {
+    ValidatorResponse {
+        index,
+        pubkey: data.pubkey.0,
+        effective_balance: data.effective_balance,
+        activation_epoch: data.activation_epoch,
+        exit_epoch: data.exit_epoch,
+        withdrawal_credentials: data.withdrawal_credentials,
+        slashed: data.slashed,
+        activation_eligibility_epoch: data.activation_eligibility_epoch,
+        withdrawable_epoch: data.withdrawable_epoch,
+    }
+}
+
+/// Convert a ValidatorSummary (4 fields) to a ValidatorResponse (API format).
+pub fn validator_summary_to_response(data: &ValidatorSummary, index: u64) -> ValidatorResponse {
     ValidatorResponse {
         index,
         pubkey: data.pubkey.0,
@@ -80,7 +96,7 @@ pub fn validator_data_to_response(data: &ValidatorData, index: u64) -> Validator
         exit_epoch: data.exit_epoch,
         withdrawal_credentials: {
             let mut wc = [0u8; 32];
-            wc[0] = 0x01; // ETH1 withdrawal prefix
+            wc[0] = 0x01;
             wc
         },
         slashed: false,

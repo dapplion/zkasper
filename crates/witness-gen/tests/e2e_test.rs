@@ -132,11 +132,19 @@ fn test_e2e_full_pipeline() {
     // 2. Create validator data with real pubkeys
     let validators: Vec<ValidatorData> = keys
         .iter()
-        .map(|(_, pk)| ValidatorData {
-            pubkey: BlsPubkey(*pk),
-            effective_balance: balance_gwei,
-            activation_epoch: 0,
-            exit_epoch: u64::MAX,
+        .map(|(_, pk)| {
+            let mut wc = [0u8; 32];
+            wc[0] = 0x01;
+            ValidatorData {
+                pubkey: BlsPubkey(*pk),
+                withdrawal_credentials: wc,
+                effective_balance: balance_gwei,
+                slashed: false,
+                activation_eligibility_epoch: 0,
+                activation_epoch: 0,
+                exit_epoch: u64::MAX,
+                withdrawable_epoch: u64::MAX,
+            }
         })
         .collect();
 

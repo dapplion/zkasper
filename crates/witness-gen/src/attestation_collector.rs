@@ -9,7 +9,7 @@ use zkasper_common::ChainConfig;
 use zkasper_common::types::{AttestationWitness, AttestingValidator, BlsPubkey, BlsSignature};
 
 use crate::beacon_api::{AttestationResponse, BeaconApi, CommitteeResponse, ValidatorResponse};
-use crate::state_diff::validator_response_to_data;
+use crate::state_diff::validator_response_to_summary;
 
 /// Collect attestations targeting a specific checkpoint.
 ///
@@ -86,7 +86,7 @@ pub async fn collect_for_checkpoint(
             let v_resp = validators
                 .get(idx as usize)
                 .context("validator index out of range")?;
-            let v_data = validator_response_to_data(v_resp);
+            let v_data = validator_response_to_summary(v_resp);
             let active_balance = v_data.active_effective_balance(epoch);
             let count_balance = seen_validators.insert(idx);
 
@@ -215,7 +215,7 @@ pub async fn collect_per_slot_for_checkpoint(
                 let v_resp = validators
                     .get(idx as usize)
                     .context("validator index out of range")?;
-                let v_data = validator_response_to_data(v_resp);
+                let v_data = validator_response_to_summary(v_resp);
                 let active_balance = v_data.active_effective_balance(epoch);
                 let count_balance = seen_validators.insert(idx);
 

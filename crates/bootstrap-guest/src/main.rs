@@ -48,7 +48,9 @@ mod tests {
     use zkasper_bootstrap_guest::verify_bootstrap_with_depth;
     use zkasper_common::constants::BEACON_STATE_VALIDATORS_FIELD_INDEX;
     use zkasper_common::poseidon::poseidon_leaf;
-    use zkasper_common::ssz::{list_hash_tree_root, sha256_pair, validator_hash_tree_root};
+    use zkasper_common::ssz::{
+        compute_validator_field_leaves, list_hash_tree_root, sha256_pair, validator_hash_tree_root,
+    };
     use zkasper_common::test_utils::*;
     use zkasper_common::types::*;
 
@@ -91,12 +93,13 @@ mod tests {
     fn test_bootstrap_4_validators() {
         let depth = 2u32;
         let epoch = 100u64;
-        let validators: Vec<ValidatorData> = (0..4).map(|i| make_validator(i, 32)).collect();
+        let validators: Vec<ValidatorData> =
+            (0..4).map(|i| make_validator(i, 32)).collect();
 
-        let field_chunks: Vec<_> = validators.iter().map(make_field_leaves).collect();
-        let pubkey_chunks: Vec<_> = validators.iter().map(make_pubkey_chunks).collect();
-
-        let validator_roots: Vec<_> = field_chunks.iter().map(validator_hash_tree_root).collect();
+        let validator_roots: Vec<_> = validators
+            .iter()
+            .map(|v| validator_hash_tree_root(&compute_validator_field_leaves(v)))
+            .collect();
         let ssz_data_root = rebuild_tree_sha256(&validator_roots, depth);
 
         let poseidon_leaves_vec: Vec<_> = validators
@@ -111,11 +114,9 @@ mod tests {
         let witness = BootstrapWitness {
             state_root,
             epoch,
-            validators: validators.clone(),
+            validators,
             state_to_validators_siblings: state_siblings,
             validators_list_length: num_validators,
-            validator_field_chunks: field_chunks,
-            validator_pubkey_chunks: pubkey_chunks,
         };
 
         let (commitment, poseidon_root, total_active_balance) =
@@ -141,10 +142,10 @@ mod tests {
         let v3 = make_validator(3, 16);
         let validators = vec![v0, v1, v2, v3];
 
-        let field_chunks: Vec<_> = validators.iter().map(make_field_leaves).collect();
-        let pubkey_chunks: Vec<_> = validators.iter().map(make_pubkey_chunks).collect();
-
-        let validator_roots: Vec<_> = field_chunks.iter().map(validator_hash_tree_root).collect();
+        let validator_roots: Vec<_> = validators
+            .iter()
+            .map(|v| validator_hash_tree_root(&compute_validator_field_leaves(v)))
+            .collect();
         let ssz_data_root = rebuild_tree_sha256(&validator_roots, depth);
 
         let num_validators = 4u64;
@@ -153,11 +154,9 @@ mod tests {
         let witness = BootstrapWitness {
             state_root,
             epoch,
-            validators: validators.clone(),
+            validators,
             state_to_validators_siblings: state_siblings,
             validators_list_length: num_validators,
-            validator_field_chunks: field_chunks,
-            validator_pubkey_chunks: pubkey_chunks,
         };
 
         let (_, _, total_active_balance) = verify_bootstrap_with_depth(&witness, depth, depth);

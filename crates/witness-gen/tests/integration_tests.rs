@@ -13,7 +13,7 @@ const TEST_CONFIG: ChainConfig = ChainConfig {
 /// Small tree depth for tests (2^2 = 4 leaves)
 const TEST_DEPTH: u32 = 2;
 use zkasper_common::poseidon::accumulator_commitment;
-use zkasper_common::test_utils::make_validator;
+use zkasper_common::test_utils::{make_validator, make_validator_summary};
 use zkasper_common::types::ValidatorData;
 
 use zkasper_witness_gen::beacon_api::ValidatorResponse;
@@ -126,7 +126,7 @@ fn test_db_save_and_load() {
     let db_path = dir.path().join("test.db");
     let db = Db::new(&db_path);
 
-    let validators: Vec<_> = (0..4).map(|i| make_validator(i, 32)).collect();
+    let validators: Vec<_> = (0..4).map(|i| make_validator_summary(i, 32)).collect();
     let tree = PoseidonTree::build(&validators, 100, 2);
     let expected_root = tree.root();
 
