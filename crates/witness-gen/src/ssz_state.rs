@@ -1,40 +1,38 @@
 //! SSZ BeaconState parsing for extracting the state-to-validators Merkle proof.
 //!
-//! Parses raw SSZ-encoded BeaconState (Fulu) bytes, computes the hash_tree_root
-//! of each top-level field, and returns the 6 Merkle siblings needed to prove
-//! the validators field (index 11) against the state root.
+//! Parses raw SSZ-encoded BeaconState bytes (Electra or Fulu), computes the
+//! hash_tree_root of each top-level field, and returns the 6 Merkle siblings
+//! needed to prove the validators field (index 11) against the state root.
 
 use anyhow::{Context, Result};
+use zkasper_common::{ChainConfig, ConsensusFork};
 use zkasper_common::ssz::sha256_pair;
 
 /// Result of parsing the SSZ state: proof siblings + computed state root.
 pub struct StateProof {
     /// Merkle siblings for validators (field 11) in the state tree.
-    /// Length 6 for Fulu (38 fields → 64 leaves → depth 6).
+    /// Length 6 (both Electra and Fulu: 37/38 fields → 64 leaves → depth 6).
     pub siblings: Vec<[u8; 32]>,
     /// The computed state root (should match the block header's state_root).
     pub state_root: [u8; 32],
 }
 
 // -----------------------------------------------------------------------
-// Fulu BeaconState fixed portion layout
+// BeaconState layout per fork
 // -----------------------------------------------------------------------
 
-/// Number of top-level fields in Fulu BeaconState.
-const FIELD_COUNT: usize = 38;
-
-/// Number of leaves in the state tree (next power of 2 above FIELD_COUNT).
+/// Number of leaves in the state tree (next power of 2 above field count).
+/// Both Electra (37 fields) and Fulu (38 fields) pad to 64 leaves.
 const STATE_TREE_LEAVES: usize = 64;
 
-/// State tree depth: ceil(log2(64)) = 6 for 38 fields padded to 64 leaves.
+/// State tree depth: ceil(log2(64)) = 6.
 const STATE_TREE_DEPTH: usize = 6;
 
-/// Indices of variable-size fields in the BeaconState.
-/// These have 4-byte offsets in the fixed portion instead of inline data.
+/// Indices of variable-size fields in the BeaconState (same for Electra and Fulu).
 const VARIABLE_FIELD_INDICES: [usize; 12] = [7, 9, 11, 12, 15, 16, 21, 24, 27, 34, 35, 36];
 
-/// Fixed-portion sizes for each field (inline bytes or 4 for variable-size offset).
-const FIELD_FIXED_SIZES: [usize; 38] = [
+/// Fixed-portion sizes for the first 37 fields (Electra). Fulu appends one more.
+const FIELD_FIXED_SIZES_ELECTRA: [usize; 37] = [
     8,       // 0:  genesis_time (uint64)
     32,      // 1:  genesis_validators_root (Bytes32)
     8,       // 2:  slot (uint64)
@@ -73,28 +71,51 @@ const FIELD_FIXED_SIZES: [usize; 38] = [
     4, // 34: pending_deposits (offset)
     4, // 35: pending_partial_withdrawals (offset)
     4, // 36: pending_consolidations (offset)
-    // --- Fulu ---
-    512, // 37: proposer_lookahead (Vector[ValidatorIndex, 64]: 64*8)
 ];
+
+/// Fulu adds field 37: proposer_lookahead (Vector[ValidatorIndex, 64]: 64*8).
+const FULU_EXTRA_FIELD_SIZE: usize = 512;
+
+fn field_count(fork: ConsensusFork) -> usize {
+    match fork {
+        ConsensusFork::Electra => 37,
+        ConsensusFork::Fulu => 38,
+    }
+}
+
+fn field_fixed_sizes(fork: ConsensusFork) -> Vec<usize> {
+    let mut sizes = FIELD_FIXED_SIZES_ELECTRA.to_vec();
+    if fork == ConsensusFork::Fulu {
+        sizes.push(FULU_EXTRA_FIELD_SIZE);
+    }
+    sizes
+}
 
 // -----------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------
 
-/// Parse raw SSZ BeaconState (Fulu) and compute the Merkle proof for
-/// the `validators` field (index 11) against the state root.
+/// Parse raw SSZ BeaconState and compute the Merkle proof for the
+/// `validators` field (index 11) against the state root.
 ///
 /// `validators_htr` is the externally-computed hash_tree_root of the
 /// validators list (from our pipeline's build_validator_roots +
 /// build_validators_ssz_tree + list_hash_tree_root). This avoids
 /// recomputing the most expensive field.
-pub fn parse_fulu_state_proof(raw_ssz: &[u8], validators_htr: &[u8; 32]) -> Result<StateProof> {
-    let field_data_ranges = parse_field_ranges(raw_ssz)?;
+pub fn parse_state_proof(
+    raw_ssz: &[u8],
+    validators_htr: &[u8; 32],
+    config: &ChainConfig,
+    slot: u64,
+) -> Result<StateProof> {
+    let fork = config.fork_at_slot(slot);
+    let count = field_count(fork);
+    let field_data_ranges = parse_field_ranges(raw_ssz, fork)?;
 
     // Compute hash_tree_root for each field
     let mut field_htrs = [[0u8; 32]; STATE_TREE_LEAVES];
 
-    for i in 0..FIELD_COUNT {
+    for i in 0..count {
         if i == 11 {
             field_htrs[i] = *validators_htr;
             continue;
@@ -103,7 +124,7 @@ pub fn parse_fulu_state_proof(raw_ssz: &[u8], validators_htr: &[u8; 32]) -> Resu
         let (start, end) = field_data_ranges[i];
         let data = &raw_ssz[start..end];
 
-        field_htrs[i] = compute_field_htr(i, data);
+        field_htrs[i] = compute_field_htr(i, data, config);
     }
 
     let (state_root, siblings) = build_state_tree_and_extract(&field_htrs, 11);
@@ -114,14 +135,17 @@ pub fn parse_fulu_state_proof(raw_ssz: &[u8], validators_htr: &[u8; 32]) -> Resu
     })
 }
 
-/// Parse raw SSZ BeaconState (Fulu) and compute the state root directly.
+/// Parse raw SSZ BeaconState and compute the state root directly.
 ///
-/// Unlike `parse_fulu_state_proof`, this computes the validators HTR internally
+/// Unlike `parse_state_proof`, this computes the validators HTR internally
 /// from the SSZ data — useful for offline validation without a separate validator list.
 /// Returns `(state_root, num_validators)`.
 #[allow(dead_code)]
-pub fn compute_fulu_state_root(raw_ssz: &[u8]) -> Result<([u8; 32], u64)> {
-    let field_data_ranges = parse_field_ranges(raw_ssz)?;
+pub fn compute_state_root(raw_ssz: &[u8], config: &ChainConfig) -> Result<([u8; 32], u64)> {
+    let slot = extract_slot(raw_ssz);
+    let fork = config.fork_at_slot(slot);
+    let count = field_count(fork);
+    let field_data_ranges = parse_field_ranges(raw_ssz, fork)?;
 
     // Compute validators HTR from the raw SSZ validators data
     let (val_start, val_end) = field_data_ranges[11];
@@ -132,21 +156,33 @@ pub fn compute_fulu_state_root(raw_ssz: &[u8]) -> Result<([u8; 32], u64)> {
     // Compute all field HTRs
     let mut field_htrs = [[0u8; 32]; STATE_TREE_LEAVES];
 
-    for i in 0..FIELD_COUNT {
+    for i in 0..count {
         if i == 11 {
             field_htrs[i] = validators_htr;
             continue;
         }
         let (start, end) = field_data_ranges[i];
-        field_htrs[i] = compute_field_htr(i, &raw_ssz[start..end]);
+        field_htrs[i] = compute_field_htr(i, &raw_ssz[start..end], config);
     }
 
     let (state_root, _siblings) = build_state_tree_and_extract(&field_htrs, 11);
     Ok((state_root, num_validators))
 }
 
+/// Read the slot (field 2) directly from raw SSZ — always at offset 40 (8 + 32).
+fn extract_slot(raw_ssz: &[u8]) -> u64 {
+    u64::from_le_bytes(raw_ssz[40..48].try_into().unwrap())
+}
+
+/// Compute `ceil_log2(EPOCHS_PER_ETH1_VOTING_PERIOD * slots_per_epoch)`.
+/// Mainnet: ceil_log2(64 * 32) = 11, Gnosis: ceil_log2(64 * 16) = 10.
+fn eth1_votes_limit_depth(config: &ChainConfig) -> u32 {
+    let limit = 64 * config.slots_per_epoch; // EPOCHS_PER_ETH1_VOTING_PERIOD = 64
+    u64::BITS - (limit - 1).leading_zeros()
+}
+
 /// Compute the hash_tree_root of a single BeaconState field by index.
-fn compute_field_htr(i: usize, data: &[u8]) -> [u8; 32] {
+fn compute_field_htr(i: usize, data: &[u8], config: &ChainConfig) -> [u8; 32] {
     match i {
         0 | 2 | 10 | 25 | 26 | 28 | 29 | 30 | 31 | 32 | 33 => htr_uint64(data),
         1 => htr_bytes32(data),
@@ -156,7 +192,7 @@ fn compute_field_htr(i: usize, data: &[u8]) -> [u8; 32] {
         6 => htr_vector_roots(data, 8192),
         7 => htr_list_roots(data, 24),
         8 => htr_eth1_data(data),
-        9 => htr_list_eth1_data(data, 11),
+        9 => htr_list_eth1_data(data, eth1_votes_limit_depth(config)),
         12 => htr_list_gwei(data, 40),
         13 => htr_vector_roots(data, 65536),
         14 => htr_vector_gwei(data, 8192),
@@ -165,6 +201,8 @@ fn compute_field_htr(i: usize, data: &[u8]) -> [u8; 32] {
         18..=20 => htr_checkpoint(data),
         21 => htr_list_gwei(data, 40),
         22 | 23 => htr_sync_committee(data),
+        // ExecutionPayloadHeader is unchanged from Deneb through Electra.
+        // Electra moved requests to a separate ExecutionRequests in BeaconBlockBody.
         24 => htr_execution_payload_header_deneb(data),
         27 => htr_list_historical_summaries(data, 24),
         34 => htr_list_pending_deposits(data, 27),
@@ -176,15 +214,17 @@ fn compute_field_htr(i: usize, data: &[u8]) -> [u8; 32] {
 }
 
 /// Extract the byte ranges of each field from a raw SSZ BeaconState.
-fn parse_field_ranges(raw_ssz: &[u8]) -> Result<Vec<(usize, usize)>> {
-    let fixed_size: usize = FIELD_FIXED_SIZES.iter().sum();
+fn parse_field_ranges(raw_ssz: &[u8], fork: ConsensusFork) -> Result<Vec<(usize, usize)>> {
+    let sizes = field_fixed_sizes(fork);
+    let count = field_count(fork);
+    let fixed_size: usize = sizes.iter().sum();
     anyhow::ensure!(raw_ssz.len() >= fixed_size, "SSZ state too small");
 
     let mut cursor = 0usize;
-    let mut field_data_ranges: Vec<(usize, usize)> = Vec::with_capacity(FIELD_COUNT);
+    let mut field_data_ranges: Vec<(usize, usize)> = Vec::with_capacity(count);
     let mut variable_offsets: Vec<(usize, u32)> = Vec::new();
 
-    for (i, &size) in FIELD_FIXED_SIZES.iter().enumerate().take(FIELD_COUNT) {
+    for (i, &size) in sizes.iter().enumerate().take(count) {
         if VARIABLE_FIELD_INDICES.contains(&i) {
             let offset = u32::from_le_bytes(
                 raw_ssz[cursor..cursor + 4]
@@ -220,8 +260,9 @@ const SSZ_VALIDATOR_SIZE: usize = 121;
 
 /// Extract validators from raw SSZ state as `ValidatorResponse` structs.
 #[allow(dead_code)]
-pub fn extract_validators(raw_ssz: &[u8]) -> Result<Vec<crate::beacon_api::ValidatorResponse>> {
-    let ranges = parse_field_ranges(raw_ssz)?;
+pub fn extract_validators(raw_ssz: &[u8], config: &ChainConfig) -> Result<Vec<crate::beacon_api::ValidatorResponse>> {
+    let fork = config.fork_at_slot(extract_slot(raw_ssz));
+    let ranges = parse_field_ranges(raw_ssz, fork)?;
     let (val_start, val_end) = ranges[11];
     let data = &raw_ssz[val_start..val_end];
     let count = data.len() / SSZ_VALIDATOR_SIZE;
@@ -274,8 +315,9 @@ pub fn extract_fork_version(raw_ssz: &[u8]) -> [u8; 4] {
 
 /// Extract slot and state_root from raw SSZ state (fields 2 and embedded in the block header).
 #[allow(dead_code)]
-pub fn extract_header(raw_ssz: &[u8]) -> Result<crate::beacon_api::HeaderResponse> {
-    let ranges = parse_field_ranges(raw_ssz)?;
+pub fn extract_header(raw_ssz: &[u8], config: &ChainConfig) -> Result<crate::beacon_api::HeaderResponse> {
+    let fork = config.fork_at_slot(extract_slot(raw_ssz));
+    let ranges = parse_field_ranges(raw_ssz, fork)?;
 
     // Field 2: slot (uint64 at known fixed offset)
     let (slot_start, _) = ranges[2];
@@ -1076,13 +1118,14 @@ mod tests {
         assert_eq!(result, sha256_pair(&source, &target));
     }
 
-    /// Test parsing a real Fulu SSZ state file from disk.
+    /// Test parsing a real SSZ state file from disk.
     ///
-    /// Requires SSZ_STATE_PATH and EXPECTED_STATE_ROOT env vars.
+    /// Requires SSZ_STATE_PATH, EXPECTED_STATE_ROOT, and CHAIN env vars.
     /// Run with:
     /// ```sh
     /// SSZ_STATE_PATH=test_data/state_13776608.ssz \
     /// EXPECTED_STATE_ROOT=0x521d21fb0fffa1e7197ae149ae7c2d81bd66cd30be6cd5744f3a4f7105c5daef \
+    /// CHAIN=mainnet \
     /// cargo test --lib ssz_state::tests::test_real_ssz_state -- --ignored
     /// ```
     #[test]
@@ -1095,7 +1138,12 @@ mod tests {
         let raw_ssz = std::fs::read(&path).expect("failed to read SSZ state file");
         eprintln!("loaded {} bytes from {}", raw_ssz.len(), path);
 
-        let (state_root, num_validators) = compute_fulu_state_root(&raw_ssz).unwrap();
+        let chain = std::env::var("CHAIN").unwrap_or_else(|_| "mainnet".to_string());
+        let config = match chain.as_str() {
+            "gnosis" => ChainConfig::GNOSIS,
+            _ => ChainConfig::MAINNET,
+        };
+        let (state_root, num_validators) = compute_state_root(&raw_ssz, &config).unwrap();
         eprintln!("  computed state_root: 0x{}", hex::encode(state_root));
         eprintln!("  num_validators: {num_validators}");
 

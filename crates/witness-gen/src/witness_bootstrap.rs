@@ -84,7 +84,7 @@ pub async fn build(
     let state_siblings = {
         let _span = info_span!("state_proof").entered();
         if let Some(raw_ssz) = api.get_state_ssz(&slot_str).await? {
-            let proof = ssz_state::parse_fulu_state_proof(&raw_ssz, &validators_htr)?;
+            let proof = ssz_state::parse_state_proof(&raw_ssz, &validators_htr, config, slot)?;
             anyhow::ensure!(
                 proof.state_root == state_root,
                 "SSZ state root {:#x?} != header state root {:#x?}",

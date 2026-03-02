@@ -18,7 +18,6 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use zkasper_common::constants::{POSEIDON_TREE_DEPTH, VALIDATORS_TREE_DEPTH};
 use zkasper_common::ChainConfig;
 
-const CONFIG: ChainConfig = ChainConfig::MAINNET;
 use zkasper_witness_gen::beacon_api::{
     self, AttestationResponse, BeaconApi, CommitteeResponse, HeaderResponse, ValidatorResponse,
 };
@@ -58,6 +57,11 @@ const STATE_2: TestState = TestState {
     expected_root: "3a9ab0228848b15f90fdd878cac181ab80e5109147a72534b7038b446ee1c8c9",
 };
 
+const GNOSIS_STATE: TestState = TestState {
+    filename: "state_26696480.ssz",
+    expected_root: "c68748b00517d0e8eeb61267df99315ec05e08789151186af0920ed571968fca",
+};
+
 // ---------------------------------------------------------------------------
 // File-backed BeaconApi
 // ---------------------------------------------------------------------------
@@ -77,13 +81,13 @@ struct StateData {
 }
 
 impl SszFileApi {
-    fn load(entries: &[(&str, &str)]) -> Self {
+    fn load(entries: &[(&str, &str)], config: &ChainConfig) -> Self {
         let mut states = HashMap::new();
 
         for &(path, expected_root_hex) in entries {
             let raw_ssz = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
 
-            let (state_root, _num_validators) = ssz_state::compute_fulu_state_root(&raw_ssz)
+            let (state_root, _num_validators) = ssz_state::compute_state_root(&raw_ssz, config)
                 .unwrap_or_else(|e| panic!("compute state root for {path}: {e}"));
 
             let expected_bytes = hex::decode(expected_root_hex).unwrap();
@@ -91,10 +95,10 @@ impl SszFileApi {
             expected_root.copy_from_slice(&expected_bytes);
             assert_eq!(state_root, expected_root, "state root mismatch for {path}");
 
-            let validators = ssz_state::extract_validators(&raw_ssz)
+            let validators = ssz_state::extract_validators(&raw_ssz, config)
                 .unwrap_or_else(|e| panic!("extract validators from {path}: {e}"));
 
-            let mut header = ssz_state::extract_header(&raw_ssz)
+            let mut header = ssz_state::extract_header(&raw_ssz, config)
                 .unwrap_or_else(|e| panic!("extract header from {path}: {e}"));
             header.state_root = state_root;
 
@@ -249,7 +253,7 @@ fn ensure_state(state: &TestState) -> String {
 
 fn load_one_state() -> (SszFileApi, u64) {
     let path1 = ensure_state(&STATE_1);
-    let api = SszFileApi::load(&[(&path1, STATE_1.expected_root)]);
+    let api = SszFileApi::load(&[(&path1, STATE_1.expected_root)], &ChainConfig::MAINNET);
     let slot = api.states.values().next().unwrap().header.slot;
     (api, slot)
 }
@@ -260,7 +264,7 @@ fn load_two_states() -> (SszFileApi, u64, u64) {
     let api = SszFileApi::load(&[
         (&path1, STATE_1.expected_root),
         (&path2, STATE_2.expected_root),
-    ]);
+    ], &ChainConfig::MAINNET);
 
     let slots: Vec<u64> = api.states.values().map(|s| s.header.slot).collect();
     let slot_1 = *slots.iter().min().unwrap();
@@ -277,6 +281,7 @@ fn load_two_states() -> (SszFileApi, u64, u64) {
 #[ignore = "downloads ~320MB, takes ~2min"]
 async fn test_ssz_file_bootstrap() {
     init_tracing();
+    const CONFIG: ChainConfig = ChainConfig::MAINNET;
 
     let (api, slot) = load_one_state();
     let epoch = slot / CONFIG.slots_per_epoch;
@@ -302,6 +307,7 @@ async fn test_ssz_file_bootstrap() {
 #[ignore = "downloads ~640MB, takes ~3min"]
 async fn test_ssz_file_epoch_diff() {
     init_tracing();
+    const CONFIG: ChainConfig = ChainConfig::MAINNET;
 
     let (api, slot_1, slot_2) = load_two_states();
     let epoch_1 = slot_1 / CONFIG.slots_per_epoch;
@@ -366,6 +372,7 @@ async fn bench_epoch_diff_guest_ops() {
     };
 
     init_tracing();
+    const CONFIG: ChainConfig = ChainConfig::MAINNET;
 
     let (api, slot_1, slot_2) = load_two_states();
     let epoch_1 = slot_1 / CONFIG.slots_per_epoch;
@@ -544,10 +551,11 @@ const FINALITY_DATA: &str = "finality_epoch_430529.json.gz";
 #[ignore = "downloads ~320MB, takes ~3min"]
 async fn test_ssz_file_finality() {
     init_tracing();
+    const CONFIG: ChainConfig = ChainConfig::MAINNET;
 
     // Load the SSZ state at slot 13776928 (epoch 430529)
     let path2 = ensure_state(&STATE_2);
-    let mut api = SszFileApi::load(&[(&path2, STATE_2.expected_root)]);
+    let mut api = SszFileApi::load(&[(&path2, STATE_2.expected_root)], &ChainConfig::MAINNET);
     let slot = 13_776_928u64;
     let epoch = slot / CONFIG.slots_per_epoch;
 
@@ -628,4 +636,22 @@ async fn test_ssz_file_finality() {
         ),
     );
     eprintln!("finality proof verified successfully!");
+}
+
+// ---------------------------------------------------------------------------
+// Gnosis Electra state root verification
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "downloads ~80MB"]
+async fn test_ssz_file_gnosis_state_root() {
+    init_tracing();
+
+    let path = ensure_state(&GNOSIS_STATE);
+    let config = ChainConfig::GNOSIS;
+    let api = SszFileApi::load(&[(&path, GNOSIS_STATE.expected_root)], &config);
+    let slot = api.states.values().next().unwrap().header.slot;
+    let num_validators = api.states.values().next().unwrap().validators.len();
+
+    eprintln!("gnosis state at slot {slot}, {num_validators} validators — state root OK");
 }

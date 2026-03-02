@@ -117,7 +117,7 @@ pub async fn build(
                 .get_header(&slot_1.to_string())
                 .await
                 .context("fetch header at slot_1")?;
-            let proof = ssz_state::parse_fulu_state_proof(&raw, &old_validators_htr)?;
+            let proof = ssz_state::parse_state_proof(&raw, &old_validators_htr, config, slot_1)?;
             anyhow::ensure!(
                 proof.state_root == header.state_root,
                 "SSZ state root mismatch at slot_1"
@@ -133,7 +133,7 @@ pub async fn build(
                 .get_header(&slot_2_str)
                 .await
                 .context("fetch header at slot_2")?;
-            let proof = ssz_state::parse_fulu_state_proof(&raw, &new_validators_htr)?;
+            let proof = ssz_state::parse_state_proof(&raw, &new_validators_htr, config, slot_2)?;
             anyhow::ensure!(
                 proof.state_root == header.state_root,
                 "SSZ state root mismatch at slot_2"

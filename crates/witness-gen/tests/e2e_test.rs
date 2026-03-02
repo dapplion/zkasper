@@ -19,6 +19,7 @@ const TEST_CONFIG: ChainConfig = ChainConfig {
     validators_tree_depth: 2,
     poseidon_tree_depth: 2,
     beacon_state_validators_field_index: 11,
+    fulu_fork_epoch: 0,
 };
 
 const TEST_DEPTH: u32 = 2;

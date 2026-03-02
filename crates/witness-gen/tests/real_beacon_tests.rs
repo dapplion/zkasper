@@ -72,7 +72,7 @@ async fn test_ssz_state_parsing() {
     eprintln!("  SSZ state size: {} bytes", raw_ssz.len());
 
     // Parse and verify
-    let proof = ssz_state::parse_fulu_state_proof(&raw_ssz, &validators_htr).unwrap();
+    let proof = ssz_state::parse_state_proof(&raw_ssz, &validators_htr, &CONFIG, slot).unwrap();
     eprintln!("  computed state_root: 0x{}", hex::encode(proof.state_root));
     assert_eq!(
         proof.state_root, header.state_root,

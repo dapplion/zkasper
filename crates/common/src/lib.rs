@@ -13,6 +13,13 @@ pub mod test_utils;
 pub mod recursion;
 pub mod types;
 
+/// Which consensus-layer fork a beacon state belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsensusFork {
+    Electra,
+    Fulu,
+}
+
 /// Network-specific configuration for beacon chain parameters.
 #[derive(Debug, Clone)]
 pub struct ChainConfig {
@@ -20,6 +27,8 @@ pub struct ChainConfig {
     pub validators_tree_depth: u32,
     pub poseidon_tree_depth: u32,
     pub beacon_state_validators_field_index: u64,
+    /// First epoch at which the Fulu fork is active. `u64::MAX` means not scheduled.
+    pub fulu_fork_epoch: u64,
 }
 
 impl ChainConfig {
@@ -28,6 +37,7 @@ impl ChainConfig {
         validators_tree_depth: 40,
         poseidon_tree_depth: 22,
         beacon_state_validators_field_index: 11,
+        fulu_fork_epoch: 0, // Fulu already active on mainnet test data
     };
 
     pub const GNOSIS: Self = Self {
@@ -35,7 +45,18 @@ impl ChainConfig {
         validators_tree_depth: 40,
         poseidon_tree_depth: 22,
         beacon_state_validators_field_index: 11,
+        fulu_fork_epoch: u64::MAX, // Fulu not yet scheduled on Gnosis
     };
+
+    /// Return the consensus fork active at `slot`.
+    pub fn fork_at_slot(&self, slot: u64) -> ConsensusFork {
+        let epoch = slot / self.slots_per_epoch;
+        if epoch >= self.fulu_fork_epoch {
+            ConsensusFork::Fulu
+        } else {
+            ConsensusFork::Electra
+        }
+    }
 }
 
 /// Beacon chain constants
